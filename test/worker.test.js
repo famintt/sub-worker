@@ -103,6 +103,18 @@ test("missing variables return config error", async () => {
   assert.equal(res.status, 500);
 });
 
+test("special characters in TOKEN work when URL-encoded", async () => {
+  const env = { SUBS: new MockKV(), TOKEN: "a+b=c" };
+  const body = b64("vless://special");
+  let res = await call(env, "POST", "/api/v1/report/special", body, {
+    authorization: "Bearer a+b=c",
+  });
+  assert.equal(res.status, 200);
+  res = await call(env, "GET", "/sub/special/a%2Bb%3Dc");
+  assert.equal(res.status, 200);
+  assert.equal(unb64(await res.text()), "vless://special");
+});
+
 test("all merges machines and delete works", async () => {
   const env = makeEnv();
   for (const [machine, text] of [
