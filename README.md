@@ -104,6 +104,55 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
 
 不需要 `PUBLIC_BASE_URL`；Worker 根路径返回的 `subscription_base` 来自当前请求的 `Origin`。
 
+### TOKEN 格式（重要）
+
+Worker 对 `TOKEN` 做**精确字符串比较**，区分大小写，不会自动 trim，也不会把不同写法当作同一个 token。
+
+推荐格式（任选一种）：
+
+```text
+UUID v4：550e8400-e29b-41d4-a716-446655440000
+base64url：A-Za-z0-9_- 组成，建议 32 字节随机值
+hex：0-9a-f，32 或 64 位
+```
+
+不建议在 token 中使用：空格、换行、引号、`/`、`?`、`#`、`&`、`%`、`+`、`=`。这些字符不是不能用，而是放进订阅 URL 路径时必须正确编码，部分客户端/代理会二次解码，容易“看起来一样但匹配不上”。
+
+在 Cloudflare 设置 `TOKEN` 时：
+
+- 只填 token 本身，不要带 `TOKEN=`、引号、前后空格或换行；
+- 用 Secret 类型；
+- `wrangler secret put TOKEN` 后直接粘贴原始值。
+
+请求头里使用**原始 token**，不要 URL 编码：
+
+```http
+Authorization: Bearer <原始 TOKEN>
+```
+
+订阅 URL 路径里使用 **URL 编码后的 token**：
+
+| 原始字符 | URL 编码 |
+|---|---|
+| `+` | `%2B` |
+| `=` | `%3D` |
+| `/` | `%2F`（不建议使用 `/`） |
+| `?` | `%3F` |
+| `#` | `%23` |
+| `&` | `%26` |
+| `%` | `%25` |
+| 空格 | `%20` |
+
+示例：
+
+```text
+原始 token：abc+def=ghi
+URL 路径：  /sub/abc%2Bdef%3Dghi
+请求头：    Authorization: Bearer abc+def=ghi
+```
+
+如果不想处理这些编码，直接用 UUID v4 最省事；Worker 不需要改代码。
+
 ## API
 
 ### 上报
