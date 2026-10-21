@@ -1,0 +1,15 @@
+# 改成你自己的 Worker 名称
+name = "singbox-sub"
+main = "src/index.js"
+compatibility_date = "2026-10-21"
+workers_dev = true
+
+# 想绑定自己的域名时取消注释并改成你的域名（该 zone 必须已接入 Cloudflare）：
+# routes = [
+#   { pattern = "sub.example.com", custom_domain = true }
+# ]
+
+[[kv_namespaces]]
+binding = "SUBS"
+# 运行 `wrangler kv namespace create SUBS` 后，把输出的 id 填到这里
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

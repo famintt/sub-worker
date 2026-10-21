@@ -1,0 +1,17 @@
+{
+  "name": "singbox-sub-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Fixed subscription endpoint for singbox-manager, backed by Cloudflare Workers KV",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test",
+    "build:single": "node scripts/build-single.mjs",
+    "check": "wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
