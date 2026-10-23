@@ -1,5 +1,5 @@
 # 改成你自己的 Worker 名称
-name = "singbox-sub"
+name = "sub-worker"
 main = "src/index.js"
 compatibility_date = "2026-10-21"
 workers_dev = true

@@ -1,4 +1,4 @@
-# singbox-sub-worker
+# sub-worker
 
 一个部署在 Cloudflare Workers 上的**固定订阅入口**：多台 singbox-manager 把各自的订阅上报到 Worker，客户端通过一个不会随服务器重启变化的 URL 获取订阅。
 
@@ -32,8 +32,8 @@ Cloudflare Worker（固定 workers.dev / 自定义域名）
 ## 快速开始（Wrangler）
 
 ```bash
-git clone https://github.com/plitoy/singbox-sub-worker.git
-cd singbox-sub-worker
+git clone https://github.com/famintt/sub-worker.git
+cd sub-worker
 pnpm install
 ```
 

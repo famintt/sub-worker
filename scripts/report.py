@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把多台机器的订阅 URL 上报到 singbox-sub-worker。
+"""把多台机器的订阅 URL 上报到 sub-worker。
 
 用法：
   python scripts/report.py --base https://xxx.workers.dev --token "$TOKEN" \

@@ -1,5 +1,5 @@
 /**
- * singbox-sub-worker
+ * sub-worker
  *
  * 固定订阅入口 + 多机器自动上报：
  *   POST /api/v1/report/:machine   Bearer TOKEN，body 为 base64 订阅
@@ -42,7 +42,7 @@ export default {
 
     if (request.method === "GET" && path === "/") {
       return json({
-        name: "singbox-sub-worker",
+        name: "sub-worker",
         version: VERSION,
         subscription_base: baseUrl(request),
         endpoints: [

@@ -1,11 +1,11 @@
-// singbox-sub-worker single-file build
+// sub-worker single-file build
 // 直接粘贴到 Cloudflare Dashboard -> Workers & Pages -> 你的 Worker -> Edit code。
 // 变量模式：在 Settings -> Variables and Secrets 设置一个 TOKEN（Secret）。
 // 对外域名由请求 Origin 自动决定，无需配置。
 // KV 绑定变量名必须是 SUBS。
 
 /**
- * singbox-sub-worker
+ * sub-worker
  *
  * 固定订阅入口 + 多机器自动上报：
  *   POST /api/v1/report/:machine   Bearer TOKEN，body 为 base64 订阅
@@ -48,7 +48,7 @@ export default {
 
     if (request.method === "GET" && path === "/") {
       return json({
-        name: "singbox-sub-worker",
+        name: "sub-worker",
         version: VERSION,
         subscription_base: baseUrl(request),
         endpoints: [
