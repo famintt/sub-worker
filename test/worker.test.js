@@ -194,7 +194,7 @@ test("machine order controls merged subscription order", async () => {
 
 test("default machine order follows region proximity and default node order follows protocol", async () => {
   const env = makeEnv();
-  const machines = ["au-aws", "ca-oracle-nat", "de-dandan", "hk-opt", "in-amd", "jp-dandan-tky", "kr-dandan", "nl-ams", "sg-dandan", "us-sje"];
+  const machines = ["au-aws", "ca-oracle-nat", "de-dandan", "hk-opt", "in-amd", "my-dandan", "jp-dandan-tky", "kr-dandan", "nl-ams", "sg-dandan", "us-sje"];
   for (const machine of machines) {
     const res = await call(env, "POST", `/api/v1/report/${machine}`, b64("vless://one"), {
       authorization: `Bearer ${TOKEN}`,
@@ -203,7 +203,7 @@ test("default machine order follows region proximity and default node order foll
   }
   let res = await call(env, "GET", "/api/v1/machines", null, { authorization: `Bearer ${TOKEN}` });
   const data = await res.json();
-  assert.deepEqual(data.machines.map((m) => m.machine), ["hk-opt", "kr-dandan", "jp-dandan-tky", "sg-dandan", "in-amd", "us-sje", "de-dandan", "nl-ams", "ca-oracle-nat", "au-aws"]);
+  assert.deepEqual(data.machines.map((m) => m.machine), ["hk-opt", "kr-dandan", "jp-dandan-tky", "sg-dandan", "in-amd", "my-dandan", "us-sje", "de-dandan", "nl-ams", "ca-oracle-nat", "au-aws"]);
 
   const links = [
     "tuic://22222222-2222-4222-8222-222222222222:pass@example.net:443?sni=deb.debian.org#TUIC",

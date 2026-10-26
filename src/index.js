@@ -20,7 +20,7 @@
  *   }
  */
 
-const VERSION = "1.1.2";
+const VERSION = "1.1.3";
 const MAX_BODY = 512 * 1024;
 const MACHINE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -53,7 +53,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </head>
 <body>
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.2</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.3</span></div>
 
 <section class="card">
 <h2>机器排序 <span class="tip">这里决定合并订阅里机器出现的先后顺序</span></h2>
@@ -427,17 +427,65 @@ async function listMachines(env) {
   return json({ ok: true, count: machines.length, machines, machine_order: order });
 }
 
+const COUNTRY_GROUPS = {
+  ASIA: "AE AF AM AZ BD BH BN BT CN GE HK ID IL IN IQ IR JO JP KG KH KP KR KW KZ LA LB LK MM MN MO MV MY NP OM PH PK PS QA SA SG SY TH TJ TL TM TR TW UZ VN YE",
+  EUROPE: "AD AL AT AX BA BE BG BY CH CY CZ DE DK EE ES FI FO FR GB GG GI GR HR HU IE IM IS IT JE LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS RU SE SI SJ SK SM UA VA XK",
+  AMERICAS: "AG AI AR AW BB BL BM BO BQ BR BS BZ CA CL CO CR CU CW DM DO EC FK GD GF GL GP GT GY HN HT JM KN KY LC MF MQ MS MX NI PA PE PM PR PY SR SV SX TC TT US UY VC VE VG VI UM",
+  AFRICA: "AO BF BI BJ BW CD CF CG CI CM CV DJ DZ EG EH ER ET GA GH GM GN GQ GW KE KM LR LS LY MA MG ML MR MU MW MZ NA NE NG RE RW SC SD SH SL SN SO SS ST SZ TD TG TN TZ UG YT ZA ZM ZW",
+  OCEANIA: "AS AU CC CK CX FJ FM GU HM KI MH MP NC NF NR NU NZ PF PG PN PW SB TK TO TV VU WF WS",
+  OTHER: "AQ BV GS IO TF",
+};
+const COUNTRY_REGION = (() => {
+  const out = {};
+  for (const [region, list] of Object.entries(COUNTRY_GROUPS)) {
+    for (const code of list.split(/\s+/)) out[code] = region;
+  }
+  return out;
+})();
+const ISO3_TO_ALPHA2 = {
+  AFG:"AF", ALB:"AL", DZA:"DZ", ASM:"AS", AND:"AD", AGO:"AO", AIA:"AI", ATA:"AQ", ATG:"AG", ARG:"AR", ARM:"AM", ABW:"AW", AUS:"AU", AUT:"AT", AZE:"AZ",
+  BHS:"BS", BHR:"BH", BGD:"BD", BRB:"BB", BLR:"BY", BEL:"BE", BLZ:"BZ", BEN:"BJ", BMU:"BM", BTN:"BT", BOL:"BO", BES:"BQ", BIH:"BA", BWA:"BW", BVT:"BV",
+  BRA:"BR", IOT:"IO", BRN:"BN", BGR:"BG", BFA:"BF", BDI:"BI", CPV:"CV", KHM:"KH", CMR:"CM", CAN:"CA", CYM:"KY", CAF:"CF", TCD:"TD", CHL:"CL", CHN:"CN",
+  CXR:"CX", CCK:"CC", COL:"CO", COM:"KM", COG:"CG", COD:"CD", COK:"CK", CRI:"CR", CIV:"CI", HRV:"HR", CUB:"CU", CUW:"CW", CYP:"CY", CZE:"CZ", DNK:"DK",
+  DJI:"DJ", DMA:"DM", DOM:"DO", ECU:"EC", EGY:"EG", SLV:"SV", GNQ:"GQ", ERI:"ER", EST:"EE", SWZ:"SZ", ETH:"ET", FLK:"FK", FRO:"FO", FJI:"FJ", FIN:"FI",
+  FRA:"FR", GUF:"GF", PYF:"PF", ATF:"TF", GAB:"GA", GMB:"GM", GEO:"GE", DEU:"DE", GHA:"GH", GIB:"GI", GRC:"GR", GRL:"GL", GRD:"GD", GLP:"GP", GUM:"GU",
+  GTM:"GT", GGY:"GG", GIN:"GN", GNB:"GW", GUY:"GY", HTI:"HT", HMD:"HM", VAT:"VA", HND:"HN", HKG:"HK", HUN:"HU", ISL:"IS", IND:"IN", IDN:"ID", IRN:"IR",
+  IRQ:"IQ", IRL:"IE", IMN:"IM", ISR:"IL", ITA:"IT", JAM:"JM", JPN:"JP", JEY:"JE", JOR:"JO", KAZ:"KZ", KEN:"KE", KIR:"KI", PRK:"KP", KOR:"KR", KWT:"KW",
+  KGZ:"KG", LAO:"LA", LVA:"LV", LBN:"LB", LSO:"LS", LBR:"LR", LBY:"LY", LIE:"LI", LTU:"LT", LUX:"LU", MAC:"MO", MDG:"MG", MWI:"MW", MYS:"MY", MDV:"MV",
+  MLI:"ML", MLT:"MT", MHL:"MH", MTQ:"MQ", MRT:"MR", MUS:"MU", MYT:"YT", MEX:"MX", FSM:"FM", MDA:"MD", MCO:"MC", MNG:"MN", MNE:"ME", MSR:"MS", MAR:"MA",
+  MOZ:"MZ", MMR:"MM", NAM:"NA", NRU:"NR", NPL:"NP", NLD:"NL", NCL:"NC", NZL:"NZ", NIC:"NI", NER:"NE", NGA:"NG", NIU:"NU", NFK:"NF", MKD:"MK", MNP:"MP",
+  NOR:"NO", OMN:"OM", PAK:"PK", PLW:"PW", PSE:"PS", PAN:"PA", PNG:"PG", PRY:"PY", PER:"PE", PHL:"PH", PCN:"PN", POL:"PL", PRT:"PT", PRI:"PR", QAT:"QA",
+  REU:"RE", ROU:"RO", RUS:"RU", RWA:"RW", BLM:"BL", SHN:"SH", KNA:"KN", LCA:"LC", MAF:"MF", SPM:"PM", VCT:"VC", WSM:"WS", SMR:"SM", STP:"ST", SAU:"SA",
+  SEN:"SN", SRB:"RS", SYC:"SC", SLE:"SL", SGP:"SG", SXM:"SX", SVK:"SK", SVN:"SI", SLB:"SB", SOM:"SO", ZAF:"ZA", SGS:"GS", SSD:"SS", ESP:"ES", LKA:"LK",
+  SDN:"SD", SUR:"SR", SJM:"SJ", SWE:"SE", CHE:"CH", SYR:"SY", TWN:"TW", TJK:"TJ", TZA:"TZ", THA:"TH", TLS:"TL", TGO:"TG", TKL:"TK", TON:"TO", TTO:"TT",
+  TUN:"TN", TUR:"TR", TKM:"TM", TCA:"TC", TUV:"TV", UGA:"UG", UKR:"UA", ARE:"AE", GBR:"GB", USA:"US", UMI:"UM", URY:"UY", UZB:"UZ", VUT:"VU", VEN:"VE",
+  VNM:"VN", VGB:"VG", VIR:"VI", WLF:"WF", ESH:"EH", YEM:"YE", ZMB:"ZM", ZWE:"ZW",
+};
+const MACHINE_ALIASES = { PHX: "US", FRA: "FR", DXB: "AE", AMS: "NL", TKY: "JP", OSA: "JP", SIN: "SG", HKG: "HK", SFO: "US", SJC: "US", LAX: "US", NYC: "US" };
+
+function countryCodeOf(machine) {
+  const first = String(machine || "").toLowerCase().split("-")[0].toUpperCase();
+  if (!first) return "";
+  if (first === "UK") return "GB";
+  if (first === "EL") return "GR";
+  if (MACHINE_ALIASES[first]) return MACHINE_ALIASES[first];
+  if (first.length === 2) return first;
+  if (first.length === 3) return ISO3_TO_ALPHA2[first] || "";
+  return "";
+}
+
 function defaultMachineRank(machine) {
-  const m = String(machine || "").toLowerCase();
-  if (/^hk(?:-|$)/.test(m)) return 10;
-  if (/^kr(?:-|$)/.test(m)) return 20;
-  if (/^jp(?:-|$)/.test(m)) return 30;
-  if (/^sg(?:-|$)/.test(m)) return 40;
-  if (/^(in|my|dxb|il|pk|bd|lk|np|th|vn|ph|id|kz|ae|qa|sa|tr)(?:-|$)/.test(m)) return 50;
-  if (/^us(?:-|$)/.test(m) || m === "phx-amd") return 60;
-  if (/^de(?:-|$)/.test(m)) return 70;
-  if (/^(nl|uk|fr|fra|fi|se|no|dk|pl|cz|at|ch|be|es|it|pt|ie|ro|bg|gr|hu|lt|lv|ee)(?:-|$)/.test(m)) return 80;
-  if (/^(ca|mx|br|ar|cl|pe|co)(?:-|$)/.test(m)) return 90;
+  const code = countryCodeOf(machine);
+  if (code === "HK") return 10;
+  if (code === "KR") return 20;
+  if (code === "JP") return 30;
+  if (code === "SG") return 40;
+  if (code === "US") return 60;
+  if (code === "DE") return 70;
+  const region = COUNTRY_REGION[code] || "OTHER";
+  if (region === "ASIA") return 50;
+  if (region === "EUROPE") return 80;
+  if (region === "AMERICAS") return 90;
   return 100;
 }
 

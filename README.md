@@ -274,6 +274,8 @@ curl -X PUT \
 节点：Reality → AnyTLS → Argo → CDN → HY2 → TUIC → SOCKS5
 ```
 
+内置完整的 ISO 3166-1 alpha-2 国家/地区代码、常用 alpha-3 代码和城市别名（如 FRA、PHX、DXB、AMS、HKG）；未知前缀自动归入“其他”。
+
 手动保存机器顺序或节点顺序后会覆盖默认排序。
 
 ### 响应示例
