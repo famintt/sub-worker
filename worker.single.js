@@ -26,7 +26,7 @@
  *   }
  */
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const MAX_BODY = 512 * 1024;
 const MACHINE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -37,27 +37,27 @@ const UI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sub-worker 节点管理</title>
 <style>
-:root{--bg:#0b1020;--card:#121a33;--line:#27365d;--ink:#e9eefc;--sub:#9eacd0;--acc:#5b8cff;--ok:#28c76f;--err:#ff6b6b;--input:#0d1430}
-*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#0b1020,#0e1530);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
+:root{--bg:#ffffff;--card:#ffffff;--line:#dfe6ef;--ink:#1f2937;--sub:#64748b;--acc:#2563eb;--ok:#15803d;--err:#dc2626;--input:#ffffff}
+*{box-sizing:border-box}body{margin:0;background:#ffffff;color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
 .wrap{max-width:1180px;margin:28px auto 50px;padding:0 18px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
 h1{font-size:25px;margin:0}.ver{color:var(--acc);font:12px ui-monospace,Consolas,monospace;border:1px solid var(--line);padding:3px 8px;border-radius:8px}
-.card{background:rgba(127,157,255,.06);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:18px}
+.card{background:#ffffff;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(15,23,42,.06)}
 .card h2{font-size:17px;margin:0 0 12px}.tip{font-size:12px;color:var(--sub);font-weight:400}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.row label{color:var(--sub);font-size:13px}
 select,input,button{font:14px inherit}select,input{background:var(--input);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 10px;outline:none}
-select:focus,input:focus{border-color:var(--acc)}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#192448;color:var(--ink)}
+select:focus,input:focus{border-color:var(--acc)}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#f1f5f9;color:var(--ink)}
 button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}button.danger{color:var(--err)}
 button:disabled{opacity:.4;cursor:not-allowed}.nodes{margin-top:14px;display:grid;gap:8px}.node{display:grid;grid-template-columns:34px 1fr 180px 34px 34px 34px;gap:8px;align-items:center}
 .node .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.node input.link{font:12px ui-monospace,Consolas,monospace;min-width:0}
 .node input.name{font-size:13px}.node button{padding:6px 8px}.status{margin-top:12px;min-height:22px;font-size:13px;color:var(--sub)}.status.ok{color:var(--ok)}.status.err{color:var(--err)}
-code{font:12px ui-monospace,Consolas,monospace;color:#9fc0ff;word-break:break-all}.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
+code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-all}.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
 .hint{color:var(--sub);font-size:12px;line-height:1.7}.empty{color:var(--sub);padding:20px 0;text-align:center}
 @media(max-width:850px){.node{grid-template-columns:28px 1fr;padding-bottom:8px;border-bottom:1px dashed var(--line)}.node input.name{grid-column:2}.node button{grid-row:2}.node .idx{grid-row:1/span 2}}
 </style>
 </head>
 <body>
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">编辑节点链接、名称和排序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.0</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">编辑节点链接、名称和排序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.1</span></div>
 
 <section class="card">
 <h2>节点配置 <span class="tip">先选择机器</span></h2>
@@ -648,7 +648,7 @@ function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders(), "content-type": "application/json; charset=utf-8" } });
 }
 function html(text) {
-  return new Response(text, { headers: { ...corsHeaders(), "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY" } });
+  return new Response(text, { headers: { ...corsHeaders(), "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY" } });
 }
 function unauthorized() { return json({ ok: false, error: "unauthorized" }, 401); }
 function missingConfig(name) { return json({ ok: false, error: `${name} is not configured` }, 500); }

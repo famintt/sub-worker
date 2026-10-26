@@ -155,7 +155,10 @@ test("webui is served with token auth", async () => {
   const env = makeEnv();
   let res = await call(env, "GET", `/ui/${TOKEN}`);
   assert.equal(res.status, 200);
-  assert.match(await res.text(), /节点管理/);
+  assert.match(res.headers.get("content-security-policy"), /connect-src 'self'/);
+  const page = await res.text();
+  assert.match(page, /节点管理/);
+  assert.match(page, /background:#ffffff/);
 
   res = await call(env, "GET", "/ui/wrong");
   assert.equal(res.status, 401);
