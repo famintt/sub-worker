@@ -158,10 +158,38 @@ test("webui is served with token auth", async () => {
   assert.match(res.headers.get("content-security-policy"), /connect-src 'self'/);
   const page = await res.text();
   assert.match(page, /节点管理/);
+  assert.match(page, /机器排序/);
   assert.match(page, /background:#ffffff/);
 
   res = await call(env, "GET", "/ui/wrong");
   assert.equal(res.status, 401);
+});
+
+test("machine order controls merged subscription order", async () => {
+  const env = makeEnv();
+  for (const [machine, text] of [
+    ["machine-a", "vless://a"],
+    ["machine-b", "tuic://b"],
+    ["machine-c", "anytls://c"],
+  ]) {
+    const res = await call(env, "POST", `/api/v1/report/${machine}`, b64(text), {
+      authorization: `Bearer ${TOKEN}`,
+    });
+    assert.equal(res.status, 200);
+  }
+  let res = await call(env, "PUT", "/api/v1/machines/order", JSON.stringify({ machines: ["machine-c", "machine-a", "machine-b"] }), {
+    authorization: `Bearer ${TOKEN}`,
+    "content-type": "application/json",
+  });
+  assert.equal(res.status, 200);
+
+  res = await call(env, "GET", "/api/v1/machines", null, { authorization: `Bearer ${TOKEN}` });
+  const data = await res.json();
+  assert.deepEqual(data.machines.map((m) => m.machine), ["machine-c", "machine-a", "machine-b"]);
+
+  res = await call(env, "GET", `/sub/all/${TOKEN}`);
+  const merged = unb64(await res.text()).split("\n");
+  assert.deepEqual(merged, ["anytls://c", "vless://a", "tuic://b"]);
 });
 
 test("subscription formats adapt from query and user-agent", async () => {

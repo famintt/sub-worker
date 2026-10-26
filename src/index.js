@@ -20,7 +20,7 @@
  *   }
  */
 
-const VERSION = "1.1.1";
+const VERSION = "1.1.2";
 const MAX_BODY = 512 * 1024;
 const MACHINE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -44,6 +44,8 @@ button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border
 button:disabled{opacity:.4;cursor:not-allowed}.nodes{margin-top:14px;display:grid;gap:8px}.node{display:grid;grid-template-columns:34px 1fr 180px 34px 34px 34px;gap:8px;align-items:center}
 .node .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.node input.link{font:12px ui-monospace,Consolas,monospace;min-width:0}
 .node input.name{font-size:13px}.node button{padding:6px 8px}.status{margin-top:12px;min-height:22px;font-size:13px;color:var(--sub)}.status.ok{color:var(--ok)}.status.err{color:var(--err)}
+.machine-list{display:grid;gap:7px;margin-top:12px}.machine{display:grid;grid-template-columns:34px 1fr 90px 34px 34px 70px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
+.machine .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.machine .mname{font-weight:600}.machine .mcount{font-size:12px;color:var(--sub)}.machine button{padding:5px 7px}.machine .edit{font-size:12px;padding:5px 8px}
 code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-all}.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
 .hint{color:var(--sub);font-size:12px;line-height:1.7}.empty{color:var(--sub);padding:20px 0;text-align:center}
 @media(max-width:850px){.node{grid-template-columns:28px 1fr;padding-bottom:8px;border-bottom:1px dashed var(--line)}.node input.name{grid-column:2}.node button{grid-row:2}.node .idx{grid-row:1/span 2}}
@@ -51,11 +53,18 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </head>
 <body>
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">编辑节点链接、名称和排序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.1</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.2</span></div>
+
+<section class="card">
+<h2>机器排序 <span class="tip">这里决定合并订阅里机器出现的先后顺序</span></h2>
+<div id="machine-list" class="machine-list"></div>
+<div class="row" style="margin-top:12px"><button id="save-machine-order" class="primary" type="button">保存机器顺序</button></div>
+<div id="order-status" class="status"></div>
+</section>
 
 <section class="card">
 <h2>节点配置 <span class="tip">先选择机器</span></h2>
-<div class="row"><label>机器</label><select id="machine"></select><button id="reload" type="button">刷新</button><button id="reset" class="danger" type="button">恢复自动上报</button></div>
+<div class="row"><label>编辑机器</label><select id="machine"></select><button id="reload" type="button">刷新</button><button id="reset" class="danger" type="button">恢复自动上报</button></div>
 <div id="nodes" class="nodes"></div>
 <div class="row" style="margin-top:12px"><button id="add" type="button">+ 添加节点</button><button id="save" class="primary" type="button">保存配置</button></div>
 <div id="status" class="status"></div>
@@ -119,6 +128,24 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
     if (!state.current || !state.machines.some(function (m) { return m.machine === state.current; })) state.current = state.machines[0].machine;
     sel.value = state.current;
   }
+  function renderMachineList() {
+    var box = $("machine-list"); box.innerHTML = "";
+    if (!state.machines.length) { var e = document.createElement("div"); e.className = "empty"; e.textContent = "暂无机器上报"; box.appendChild(e); return; }
+    state.machines.forEach(function (m, index) {
+      var row = document.createElement("div"); row.className = "machine";
+      var idx = document.createElement("div"); idx.className = "idx"; idx.textContent = String(index + 1);
+      var name = document.createElement("div"); name.className = "mname"; name.textContent = m.machine + (m.manual ? "（手动）" : "");
+      var count = document.createElement("div"); count.className = "mcount"; count.textContent = (m.nodes || 0) + " 节点";
+      var up = document.createElement("button"); up.type = "button"; up.textContent = "↑"; up.title = "上移"; up.disabled = index === 0;
+      var down = document.createElement("button"); down.type = "button"; down.textContent = "↓"; down.title = "下移"; down.disabled = index === state.machines.length - 1;
+      var edit = document.createElement("button"); edit.type = "button"; edit.className = "edit"; edit.textContent = "编辑节点";
+      up.onclick = function () { if (index > 0) { var t = state.machines[index - 1]; state.machines[index - 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
+      down.onclick = function () { if (index < state.machines.length - 1) { var t = state.machines[index + 1]; state.machines[index + 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
+      edit.onclick = function () { state.current = m.machine; $("machine").value = m.machine; loadNodes(); };
+      row.appendChild(idx); row.appendChild(name); row.appendChild(count); row.appendChild(up); row.appendChild(down); row.appendChild(edit);
+      box.appendChild(row);
+    });
+  }
   function renderUrls() {
     var base = location.origin + "/sub/all/" + encodeURIComponent(TOKEN);
     $("url-base").textContent = base;
@@ -135,10 +162,17 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
   }
   function loadMachines() {
     return api("/machines").then(function (data) {
-      state.machines = data.machines || []; renderMachines(); return loadNodes();
+      state.machines = data.machines || []; renderMachines(); renderMachineList(); return loadNodes();
     }).catch(function (e) { setStatus("加载失败：" + e.message, false); });
   }
   $("machine").onchange = function () { state.current = this.value; loadNodes(); };
+  $("save-machine-order").onclick = function () {
+    var machines = state.machines.map(function (m) { return m.machine; });
+    var el = $("order-status"); el.textContent = "保存中..."; el.className = "status";
+    api("/machines/order", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ machines: machines }) })
+      .then(function () { el.textContent = "机器顺序已保存"; el.className = "status ok"; return loadMachines(); })
+      .catch(function (e) { el.textContent = "保存失败：" + e.message; el.className = "status err"; });
+  };
   $("reload").onclick = loadMachines;
   $("add").onclick = function () { state.nodes.push({ link: "", name: "" }); render(); };
   $("save").onclick = function () {
@@ -192,6 +226,7 @@ export default {
           "GET /sub/:token",
           "GET/PUT /api/v1/nodes/:machine",
           "POST /api/v1/machines/:machine/reset",
+          "GET/PUT /api/v1/machines/order",
           "GET /api/v1/machines",
           "GET /health",
         ],
@@ -229,6 +264,15 @@ export default {
       if (!checkBearer(request, authToken(env))) return unauthorized();
       if (request.method !== "POST") return methodNotAllowed("POST");
       return resetMachine(env, decodeURIComponent(m[1]));
+    }
+
+    m = path.match(/^\/api\/v1\/machines\/order$/);
+    if (m) {
+      if (!authToken(env)) return missingConfig("TOKEN");
+      if (!checkBearer(request, authToken(env))) return unauthorized();
+      if (request.method === "GET") return json({ ok: true, machine_order: await getMachineOrder(env) });
+      if (request.method !== "PUT") return methodNotAllowed("GET, PUT");
+      return putMachineOrder(request, env);
     }
 
     m = path.match(/^\/api\/v1\/machines(?:\/([^/]+))?$/);
@@ -307,6 +351,8 @@ async function getAll(env, token, request) {
   if (!authToken(env)) return missingConfig("TOKEN");
   if (!checkToken(token, authToken(env))) return unauthorized();
   const list = await env.SUBS.list({ prefix: "sub:" });
+  const order = await getMachineOrder(env);
+  const rank = new Map(order.map((m, i) => [m, i]));
   const all = [];
   let manual = 0;
   for (const key of list.keys) {
@@ -316,8 +362,12 @@ async function getAll(env, token, request) {
     const nodes = await nodesOf(record);
     nodes.forEach((n) => all.push({ ...n, machine: record.machine }));
   }
-  all.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.machine).localeCompare(String(b.machine)) || String(a.name).localeCompare(String(b.name)));
-  return subResponse(all, request, { "x-machines": String(list.keys.length), "x-nodes": String(all.length), "x-manual-machines": String(manual) });
+  all.sort((a, b) => {
+    const ar = rank.has(a.machine) ? rank.get(a.machine) : 9999;
+    const br = rank.has(b.machine) ? rank.get(b.machine) : 9999;
+    return ar - br || (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.machine).localeCompare(String(b.machine)) || String(a.name).localeCompare(String(b.name));
+  });
+  return subResponse(all, request, { "x-machines": String(list.keys.length), "x-nodes": String(all.length), "x-manual-machines": String(manual), "x-machine-order": order.join(",") });
 }
 
 async function getNodeConfig(env, machine) {
@@ -360,6 +410,8 @@ async function resetMachine(env, machine) {
 
 async function listMachines(env) {
   const list = await env.SUBS.list({ prefix: "sub:" });
+  const order = await getMachineOrder(env);
+  const rank = new Map(order.map((m, i) => [m, i]));
   const machines = [];
   for (const key of list.keys) {
     const record = await env.SUBS.get(key.name, { type: "json" });
@@ -367,13 +419,39 @@ async function listMachines(env) {
     const nodes = await nodesOf(record);
     machines.push({ machine: record.machine, bytes: record.bytes, updated_at: record.updated_at, hash: record.hash, manual: Boolean(record.manual), nodes: nodes.length });
   }
-  machines.sort((a, b) => a.machine.localeCompare(b.machine));
-  return json({ ok: true, count: machines.length, machines });
+  machines.sort((a, b) => {
+    const ar = rank.has(a.machine) ? rank.get(a.machine) : 9999;
+    const br = rank.has(b.machine) ? rank.get(b.machine) : 9999;
+    return ar - br || a.machine.localeCompare(b.machine);
+  });
+  return json({ ok: true, count: machines.length, machines, machine_order: order });
+}
+
+async function getMachineOrder(env) {
+  const raw = await env.SUBS.get("meta:machine_order", { type: "json" });
+  return Array.isArray(raw) ? raw.filter((x) => typeof x === "string" && MACHINE_RE.test(x)) : [];
+}
+
+async function putMachineOrder(request, env) {
+  const body = await request.text();
+  if (body.length > 65536) return json({ ok: false, error: "order too large" }, 413);
+  let data;
+  try { data = JSON.parse(body); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+  if (!data || !Array.isArray(data.machines)) return json({ ok: false, error: "machines must be an array" }, 400);
+  const unique = [];
+  for (const item of data.machines) {
+    if (typeof item !== "string" || !MACHINE_RE.test(item)) return json({ ok: false, error: "invalid machine name" }, 400);
+    if (!unique.includes(item)) unique.push(item);
+  }
+  await env.SUBS.put("meta:machine_order", JSON.stringify(unique));
+  return json({ ok: true, machine_order: unique });
 }
 
 async function deleteMachine(env, machine) {
   if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
   await env.SUBS.delete(`sub:${machine}`);
+  const order = await getMachineOrder(env);
+  if (order.includes(machine)) await env.SUBS.put("meta:machine_order", JSON.stringify(order.filter((m) => m !== machine)));
   return json({ ok: true, deleted: machine });
 }
 

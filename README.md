@@ -10,7 +10,7 @@
 - 一个 `TOKEN` 同时用于上报和读取；
 - 每台机器一个 `machine` slug，支持单机和合并订阅；
 - Cloudflare KV 存储，按内容 SHA-256 去重，相同内容不重复写；
-- **WebUI 可以编辑节点链接、节点名称和排序**；
+- **WebUI 可以编辑节点链接、节点名称、机器顺序和节点顺序**；
 - **自动适配 base64 / Clash / sing-box 订阅格式**；
 - 手动编辑后，机器自动上报不会覆盖手动配置；
 - 支持 `workers.dev` 默认域名和自定义域名；
@@ -109,6 +109,7 @@ https://<worker>/ui/<TOKEN>
 界面支持：
 
 - 选择机器；
+- **机器列表上移/下移，保存合并订阅中的机器顺序**；
 - 修改节点链接和显示名称；
 - 上移、下移调整节点顺序；
 - 添加、删除节点；
@@ -245,6 +246,8 @@ curl -X POST \
 | `GET` | `/ui/:token` | WebUI 节点管理 |
 | `GET` | `/api/v1/nodes/:machine` | 读取节点配置，Bearer `TOKEN` |
 | `PUT` | `/api/v1/nodes/:machine` | 保存节点链接/名称/顺序，Bearer `TOKEN` |
+| `GET` | `/api/v1/machines/order` | 读取机器顺序（也可从 machines 响应获取） |
+| `PUT` | `/api/v1/machines/order` | 保存机器顺序，Bearer `TOKEN` |
 | `POST` | `/api/v1/machines/:machine/reset` | 恢复自动上报，Bearer `TOKEN` |
 | `GET` | `/api/v1/machines` | 查看已上报机器，Bearer `TOKEN` |
 | `DELETE` | `/api/v1/machines/:machine` | 删除机器，Bearer `TOKEN` |
