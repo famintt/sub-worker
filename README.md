@@ -10,6 +10,9 @@
 - 一个 `TOKEN` 同时用于上报和读取；
 - 每台机器一个 `machine` slug，支持单机和合并订阅；
 - Cloudflare KV 存储，按内容 SHA-256 去重，相同内容不重复写；
+- **WebUI 可以编辑节点链接、节点名称和排序**；
+- **自动适配 base64 / Clash / sing-box 订阅格式**；
+- 手动编辑后，机器自动上报不会覆盖手动配置；
 - 支持 `workers.dev` 默认域名和自定义域名；
 - 自动从请求 `Origin` 推断对外域名，无需配置 `PUBLIC_BASE_URL`；
 - 提供单文件 `worker.single.js`，可直接粘贴到 Cloudflare Dashboard；
@@ -94,6 +97,57 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
    - `TOKEN`：你的 token；
 5. Deploy；
 6. 需要自定义域名时，在 Domains & Routes 绑定。
+
+## WebUI
+
+部署后访问：
+
+```text
+https://<worker>/ui/<TOKEN>
+```
+
+界面支持：
+
+- 选择机器；
+- 修改节点链接和显示名称；
+- 上移、下移调整节点顺序；
+- 添加、删除节点；
+- 保存后订阅立即按新顺序生成；
+- “恢复自动上报”会清除手动配置，重新采用最近一次上报内容。
+
+手动保存后，机器继续自动上报也不会覆盖已编辑节点；需要恢复自动更新时点“恢复自动上报”。
+
+## 订阅格式
+
+客户端 `User-Agent` 会自动识别：
+
+| 客户端 / 参数 | 格式 |
+|---|---|
+| V2RayN、默认 | base64 URI |
+| Clash、Mihomo、Meta | Clash YAML |
+| sing-box / singbox | sing-box JSON |
+
+也可以显式指定：
+
+```text
+/sub/all/<TOKEN>?format=base64
+/sub/all/<TOKEN>?format=clash
+/sub/all/<TOKEN>?format=singbox
+/sub/all/<TOKEN>?clash
+/sub/all/<TOKEN>?singbox
+```
+
+支持转换的节点链接包括：
+
+```text
+vless://
+anytls://
+hysteria2://
+tuic://
+trojan://
+ss://
+vmess://
+```
 
 ## 配置
 
@@ -188,11 +242,27 @@ curl -X POST \
 | `GET` | `/sub/:machine/:token` | 单机订阅 |
 | `GET` | `/sub/:token` | 全部机器合并订阅（推荐） |
 | `GET` | `/sub/all/:token` | 合并订阅的兼容旧路径 |
+| `GET` | `/ui/:token` | WebUI 节点管理 |
+| `GET` | `/api/v1/nodes/:machine` | 读取节点配置，Bearer `TOKEN` |
+| `PUT` | `/api/v1/nodes/:machine` | 保存节点链接/名称/顺序，Bearer `TOKEN` |
+| `POST` | `/api/v1/machines/:machine/reset` | 恢复自动上报，Bearer `TOKEN` |
 | `GET` | `/api/v1/machines` | 查看已上报机器，Bearer `TOKEN` |
 | `DELETE` | `/api/v1/machines/:machine` | 删除机器，Bearer `TOKEN` |
 | `GET` | `/health` | 健康检查，无需认证 |
 
 路径中的 token 建议使用 URL-safe 格式。UUID 可直接使用；如果 token 含 `+`、`=` 等字符，请做 URL 编码。
+
+### 保存节点示例
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"nodes":[{"link":"vless://...","name":"节点 A"},{"link":"tuic://...","name":"节点 B"}]}' \
+  https://<worker>/api/v1/nodes/machine-a
+```
+
+节点数组的顺序就是订阅顺序。
 
 ### 响应示例
 
@@ -200,7 +270,7 @@ curl -X POST \
 curl https://<worker>/sub/machine-a/<TOKEN>
 ```
 
-返回 `text/plain` 的 base64 订阅内容，客户端可直接作为订阅 URL 使用。
+默认返回 `text/plain` 的 base64 订阅内容；带 `?format=clash` 或 `?format=singbox` 返回对应格式。
 
 ## 多机上报
 
@@ -261,7 +331,8 @@ sub_machine='machine-a'
 ## 已知限制
 
 - Cloudflare KV 的 `list()` 是最终一致的：刚上报后立刻访问 `/sub/:token` 或 `/sub/all/:token` 可能短暂为空，通常十几秒后出现；单机 `/sub/:machine/:token` 通常立即可用；
-- 没有内置管理 UI，机器列表通过 API 查看；
+- WebUI 采用 `TOKEN` 路径认证，请勿把 `/ui/<TOKEN>` 发给他人；
+- 手动编辑后不会自动合并新上报节点，需要点“恢复自动上报”才会恢复；
 - `workers.dev` 域名在部分地区可能不可达，建议绑定自定义域名；
 - 免费 KV 有写入次数限制，本项目已做内容 hash 去重。
 
