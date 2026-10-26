@@ -369,9 +369,9 @@ async function getAll(env, token, request) {
     nodes.forEach((n) => all.push({ ...n, machine: record.machine }));
   }
   all.sort((a, b) => {
-    const ar = rank.has(a.machine) ? rank.get(a.machine) : 9999;
-    const br = rank.has(b.machine) ? rank.get(b.machine) : 9999;
-    return ar - br || (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.machine).localeCompare(String(b.machine)) || String(a.name).localeCompare(String(b.name));
+    const ar = rank.has(a.machine) ? rank.get(a.machine) : defaultMachineRank(a.machine);
+    const br = rank.has(b.machine) ? rank.get(b.machine) : defaultMachineRank(b.machine);
+    return ar - br || (Number(a._sort) || 0) - (Number(b._sort) || 0) || String(a.machine).localeCompare(String(b.machine)) || String(a.name).localeCompare(String(b.name));
   });
   return subResponse(all, request, { "x-machines": String(list.keys.length), "x-nodes": String(all.length), "x-manual-machines": String(manual), "x-machine-order": order.join(",") });
 }
@@ -426,11 +426,25 @@ async function listMachines(env) {
     machines.push({ machine: record.machine, bytes: record.bytes, updated_at: record.updated_at, hash: record.hash, manual: Boolean(record.manual), nodes: nodes.length });
   }
   machines.sort((a, b) => {
-    const ar = rank.has(a.machine) ? rank.get(a.machine) : 9999;
-    const br = rank.has(b.machine) ? rank.get(b.machine) : 9999;
+    const ar = rank.has(a.machine) ? rank.get(a.machine) : defaultMachineRank(a.machine);
+    const br = rank.has(b.machine) ? rank.get(b.machine) : defaultMachineRank(b.machine);
     return ar - br || a.machine.localeCompare(b.machine);
   });
   return json({ ok: true, count: machines.length, machines, machine_order: order });
+}
+
+function defaultMachineRank(machine) {
+  const m = String(machine || "").toLowerCase();
+  if (/^hk(?:-|$)/.test(m)) return 10;
+  if (/^kr(?:-|$)/.test(m)) return 20;
+  if (/^jp(?:-|$)/.test(m)) return 30;
+  if (/^sg(?:-|$)/.test(m)) return 40;
+  if (/^(in|my|dxb|il|pk|bd|lk|np|th|vn|ph|id|kz|ae|qa|sa|tr)(?:-|$)/.test(m)) return 50;
+  if (/^us(?:-|$)/.test(m) || m === "phx-amd") return 60;
+  if (/^de(?:-|$)/.test(m)) return 70;
+  if (/^(nl|uk|fr|fra|fi|se|no|dk|pl|cz|at|ch|be|es|it|pt|ie|ro|bg|gr|hu|lt|lv|ee)(?:-|$)/.test(m)) return 80;
+  if (/^(ca|mx|br|ar|cl|pe|co)(?:-|$)/.test(m)) return 90;
+  return 100;
 }
 
 async function getMachineOrder(env) {
@@ -462,10 +476,33 @@ async function deleteMachine(env, machine) {
 }
 
 async function nodesOf(record) {
+  let nodes;
   if (record && Array.isArray(record.nodes) && record.nodes.length) {
-    return record.nodes.slice().sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.name).localeCompare(String(b.name)));
+    nodes = record.nodes.slice();
+  } else {
+    nodes = await normalizeNodes(splitLinks(record && record.content ? decodeSafe(record.content) : ""), []);
   }
-  return normalizeNodes(splitLinks(record && record.content ? decodeSafe(record.content) : ""), []);
+  nodes.sort((a, b) => {
+    if (record && record.manual) return (Number(a.order) || 0) - (Number(b.order) || 0);
+    return protocolRank(a) - protocolRank(b) || (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.name).localeCompare(String(b.name));
+  });
+  return nodes.map((n, i) => ({ ...n, _sort: i }));
+}
+
+function protocolRank(node) {
+  const p = node && node.link ? parseLink(node.link) : null;
+  if (!p) return 90;
+  if (p.kind === "vless" && p.reality) return 10;
+  if (p.kind === "anytls") return 20;
+  if (p.kind === "vless" && p.network === "ws") {
+    const text = `${node.name || ""} ${node.link || ""}`.toLowerCase();
+    return text.includes("argo") || text.includes("trycloudflare") ? 30 : 40;
+  }
+  if (p.kind === "hy2") return 50;
+  if (p.kind === "tuic") return 60;
+  if (p.kind === "socks5" || p.kind === "socks") return 70;
+  if (p.kind === "trojan") return 75;
+  return 90;
 }
 
 async function normalizeNodes(links, previous, inputs) {
@@ -520,6 +557,7 @@ function parseLink(link) {
     if (kind === "hysteria2" || kind === "hy2") return { ...base, kind: "hy2", password: safeDecode(u.username), tls: true, sni: q.get("sni") || "", obfs: q.get("obfs") || "", obfsPassword: q.get("obfs-password") || "" };
     if (kind === "tuic") return { ...base, uuid: safeDecode(u.username), password: safeDecode(u.password), tls: true, sni: q.get("sni") || "", congestion: q.get("congestion_control") || "bbr", relay: q.get("udp_relay_mode") || "native" };
     if (kind === "trojan") return { ...base, password: safeDecode(u.username), tls: true, sni: q.get("sni") || "" };
+    if (kind === "socks5" || kind === "socks") return { ...base, kind: "socks5", username: safeDecode(u.username), password: safeDecode(u.password), tls: false, sni: "" };
     if (kind === "ss") {
       let user = safeDecode(u.username);
       if (u.password) user = `${user}:${safeDecode(u.password)}`;
@@ -630,6 +668,9 @@ function toClash(nodes) {
     } else if (p.kind === "ss") {
       lines.push(`    cipher: ${yamlString(p.method)}`);
       lines.push(`    password: ${yamlString(p.password)}`);
+    } else if (p.kind === "socks5") {
+      if (p.username) lines.push(`    username: ${yamlString(p.username)}`);
+      if (p.password) lines.push(`    password: ${yamlString(p.password)}`);
     } else if (p.kind === "vmess") {
       lines.push(`    uuid: ${yamlString(p.uuid)}`);
       lines.push(`    alterId: ${p.alterId || 0}`);
@@ -679,6 +720,11 @@ function toSingbox(nodes) {
       outbounds.push({ type: "trojan", tag, server: p.server, server_port: p.port, password: p.password, tls });
     } else if (p.kind === "ss") {
       outbounds.push({ type: "shadowsocks", tag, server: p.server, server_port: p.port, method: p.method, password: p.password });
+    } else if (p.kind === "socks5") {
+      const o = { type: "socks", tag, server: p.server, server_port: p.port };
+      if (p.username) o.username = p.username;
+      if (p.password) o.password = p.password;
+      outbounds.push(o);
     } else if (p.kind === "vmess") {
       const o = { type: "vmess", tag, server: p.server, server_port: p.port, uuid: p.uuid, security: p.cipher || "auto", alter_id: p.alterId || 0 };
       if (p.tls) o.tls = tls;

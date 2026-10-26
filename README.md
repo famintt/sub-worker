@@ -267,6 +267,15 @@ curl -X PUT \
 
 节点数组的顺序就是订阅顺序。
 
+默认排序：
+
+```text
+机器：HK → KR → JP → SG → 其他亚洲 → US → DE → 其他欧洲 → 其他美洲 → 其他
+节点：Reality → AnyTLS → Argo → CDN → HY2 → TUIC → SOCKS5
+```
+
+手动保存机器顺序或节点顺序后会覆盖默认排序。
+
 ### 响应示例
 
 ```bash

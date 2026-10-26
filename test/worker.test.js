@@ -80,7 +80,7 @@ test("report, dedupe, read and list", async () => {
 
   res = await call(env, "GET", `/sub/sgw/${TOKEN}`);
   assert.equal(res.status, 200);
-  assert.equal(unb64(await res.text()), "vless://one\nanytls://two");
+  assert.equal(unb64(await res.text()), "anytls://two\nvless://one");
 
   res = await call(env, "GET", `/sub/sgw/wrong`);
   assert.equal(res.status, 401);
@@ -192,6 +192,37 @@ test("machine order controls merged subscription order", async () => {
   assert.deepEqual(merged, ["anytls://c", "vless://a", "tuic://b"]);
 });
 
+test("default machine order follows region proximity and default node order follows protocol", async () => {
+  const env = makeEnv();
+  const machines = ["au-aws", "ca-oracle-nat", "de-dandan", "hk-opt", "in-amd", "jp-dandan-tky", "kr-dandan", "nl-ams", "sg-dandan", "us-sje"];
+  for (const machine of machines) {
+    const res = await call(env, "POST", `/api/v1/report/${machine}`, b64("vless://one"), {
+      authorization: `Bearer ${TOKEN}`,
+    });
+    assert.equal(res.status, 200);
+  }
+  let res = await call(env, "GET", "/api/v1/machines", null, { authorization: `Bearer ${TOKEN}` });
+  const data = await res.json();
+  assert.deepEqual(data.machines.map((m) => m.machine), ["hk-opt", "kr-dandan", "jp-dandan-tky", "sg-dandan", "in-amd", "us-sje", "de-dandan", "nl-ams", "ca-oracle-nat", "au-aws"]);
+
+  const links = [
+    "tuic://22222222-2222-4222-8222-222222222222:pass@example.net:443?sni=deb.debian.org#TUIC",
+    "hysteria2://hysecret@example.io:443?sni=addons.mozilla.org#HY2",
+    "socks5://user:pass@example.org:1080#SOCKS5",
+    "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&sni=pypi.org&pbk=abc&sid=dead&type=tcp#Reality",
+    "vless://33333333-3333-4333-8333-333333333333@example.com:443?security=tls&type=ws&host=node.trycloudflare.com&path=%2Fargo&sni=node.trycloudflare.com#Node-Argo",
+    "vless://44444444-4444-4444-8444-444444444444@example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Fcdn&sni=cdn.example.com#Node-CDN",
+    "anytls://secret@example.org:8443?sni=rubygems.org#AnyTLS",
+  ];
+  res = await call(env, "POST", "/api/v1/report/order-proto", b64(links.join("\n")), {
+    authorization: `Bearer ${TOKEN}`,
+  });
+  assert.equal(res.status, 200);
+  res = await call(env, "GET", "/api/v1/nodes/order-proto", null, { authorization: `Bearer ${TOKEN}` });
+  const nodeData = await res.json();
+  assert.deepEqual(nodeData.nodes.map((n) => n.name), ["Reality", "AnyTLS", "Node-Argo", "Node-CDN", "HY2", "TUIC", "SOCKS5"]);
+});
+
 test("subscription formats adapt from query and user-agent", async () => {
   const env = makeEnv();
   await call(env, "POST", "/api/v1/report/fmt", b64(SAMPLE_LINKS.join("\n")), {
@@ -214,8 +245,8 @@ test("subscription formats adapt from query and user-agent", async () => {
   assert.equal(singbox.outbounds.length, 4);
   assert.equal(singbox.outbounds[0].type, "vless");
   assert.equal(singbox.outbounds[1].type, "anytls");
-  assert.equal(singbox.outbounds[2].type, "tuic");
-  assert.equal(singbox.outbounds[3].type, "hysteria2");
+  assert.equal(singbox.outbounds[2].type, "hysteria2");
+  assert.equal(singbox.outbounds[3].type, "tuic");
 
   res = await call(env, "GET", `/sub/fmt/${TOKEN}`, null, { "user-agent": "clash-meta/1.0" });
   assert.match(await res.text(), /^proxies:/);
