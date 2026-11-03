@@ -26,7 +26,7 @@
  *   }
  */
 
-const VERSION = "1.1.3";
+const VERSION = "1.1.4";
 const MAX_BODY = 512 * 1024;
 const MACHINE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -50,7 +50,7 @@ button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border
 button:disabled{opacity:.4;cursor:not-allowed}.nodes{margin-top:14px;display:grid;gap:8px}.node{display:grid;grid-template-columns:34px 1fr 180px 34px 34px 34px;gap:8px;align-items:center}
 .node .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.node input.link{font:12px ui-monospace,Consolas,monospace;min-width:0}
 .node input.name{font-size:13px}.node button{padding:6px 8px}.status{margin-top:12px;min-height:22px;font-size:13px;color:var(--sub)}.status.ok{color:var(--ok)}.status.err{color:var(--err)}
-.machine-list{display:grid;gap:7px;margin-top:12px}.machine{display:grid;grid-template-columns:34px 1fr 90px 34px 34px 70px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
+.machine-list{display:grid;gap:7px;margin-top:12px}.machine{display:grid;grid-template-columns:34px 1fr 90px 34px 34px 70px 34px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
 .machine .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.machine .mname{font-weight:600}.machine .mcount{font-size:12px;color:var(--sub)}.machine button{padding:5px 7px}.machine .edit{font-size:12px;padding:5px 8px}
 code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-all}.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
 .hint{color:var(--sub);font-size:12px;line-height:1.7}.empty{color:var(--sub);padding:20px 0;text-align:center}
@@ -59,7 +59,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </head>
 <body>
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.3</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.4</span></div>
 
 <section class="card">
 <h2>机器排序 <span class="tip">这里决定合并订阅里机器出现的先后顺序</span></h2>
@@ -148,7 +148,18 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
       up.onclick = function () { if (index > 0) { var t = state.machines[index - 1]; state.machines[index - 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
       down.onclick = function () { if (index < state.machines.length - 1) { var t = state.machines[index + 1]; state.machines[index + 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
       edit.onclick = function () { state.current = m.machine; $("machine").value = m.machine; loadNodes(); };
-      row.appendChild(idx); row.appendChild(name); row.appendChild(count); row.appendChild(up); row.appendChild(down); row.appendChild(edit);
+      var del = document.createElement("button");
+      del.type = "button"; del.className = "danger"; del.textContent = "×"; del.title = "删除机器";
+      del.onclick = function () {
+        if (!window.confirm("确定删除机器 " + m.machine + "？该机器的所有节点也会从订阅中移除。")) return;
+        api("/machines/" + encodeURIComponent(m.machine), { method: "DELETE" }).then(function () {
+          setStatus("已删除机器：" + m.machine, true);
+          return loadMachines();
+        }).catch(function (err) {
+          setStatus("删除失败：" + err.message, false);
+        });
+      };
+      row.appendChild(idx); row.appendChild(name); row.appendChild(count); row.appendChild(up); row.appendChild(down); row.appendChild(edit); row.appendChild(del);
       box.appendChild(row);
     });
   }

@@ -159,6 +159,7 @@ test("webui is served with token auth", async () => {
   const page = await res.text();
   assert.match(page, /节点管理/);
   assert.match(page, /机器排序/);
+  assert.match(page, /删除机器/);
   assert.match(page, /background:#ffffff/);
 
   res = await call(env, "GET", "/ui/wrong");
