@@ -79,13 +79,6 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 <div class="wrap">
 <div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.0</span></div>
 
-<section class="card">
-<h2>新增机器 <span class="tip">手动添加的机器不依赖自动上报</span></h2>
-<div class="row"><label>机器名</label><input id="new-machine" placeholder="例如 hk-opt-dandan" size="26"><label>节点链接</label></div>
-<textarea id="new-links" placeholder="每行一个链接，可留空先建空机器&#10;vless://...&#10;tuic://..."></textarea>
-<div class="row" style="margin-top:10px"><button id="create-machine" class="primary" type="button">创建机器</button><span id="create-status" class="status"></span></div>
-<div class="hint">机器名只允许小写字母、数字和连字符。创建后可在下方编辑节点，或用“密钥”按钮生成该机的上报密钥。</div>
-</section>
 
 <section class="card">
 <h2>机器排序 <span class="tip">这里决定合并订阅里机器出现的先后顺序</span></h2>
@@ -100,6 +93,14 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 <div id="nodes" class="nodes"></div>
 <div class="row" style="margin-top:12px"><button id="add" type="button">+ 添加节点</button><button id="save" class="primary" type="button">保存配置</button></div>
 <div id="status" class="status"></div>
+</section>
+
+<section class="card">
+<h2>新增机器 <span class="tip">手动添加的机器不依赖自动上报</span></h2>
+<div class="row"><label>机器名</label><input id="new-machine" placeholder="例如 hk-opt-dandan" size="26"><label>节点链接</label></div>
+<textarea id="new-links" placeholder="每行一个链接，可留空先建空机器&#10;vless://...&#10;tuic://..."></textarea>
+<div class="row" style="margin-top:10px"><button id="create-machine" class="primary" type="button">创建机器</button><span id="create-status" class="status"></span></div>
+<div class="hint">机器名只允许小写字母、数字和连字符。创建后可在下方编辑节点，或用“密钥”按钮生成该机的上报密钥。</div>
 </section>
 
 <section class="card">
