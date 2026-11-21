@@ -340,3 +340,15 @@ test("invalid machine names and links are rejected", async () => {
   assert.equal(bad.status, 400);
   assert.equal(await env.SUBS.get("manual:sgw"), null);
 });
+
+test("served UI script must be syntactically valid javascript", async () => {
+  // 回归：UI 里内嵌 <script> 的源码一旦被模板字面量提前解释转义序列
+  // （例如 /\r?\n/ 变成真实换行），页面脚本会整体 SyntaxError，登录按钮失效。
+  const env = makeEnv();
+  const res = await call(env, "GET", "/ui");
+  const html = await res.text();
+  const m = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(m, "UI 必须内联一个脚本");
+  assert.doesNotThrow(() => new Function(m[1]));
+  assert.ok(m[1].includes("split(/\\r?\\n/)"), "换行拆分正则必须保留反斜杠");
+});

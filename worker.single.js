@@ -237,7 +237,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
   function createMachine() {
     var machine = ($("new-machine").value || "").trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(machine)) { setStatus("create-status", "机器名只能用小写字母、数字、连字符", false); return; }
-    var links = ($("new-links").value || "").split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean);
+    var links = ($("new-links").value || "").split(/\\r?\\n/).map(function (x) { return x.trim(); }).filter(Boolean);
     api("/machines/" + encodeURIComponent(machine), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
       .then(function () {
         if (!links.length) return null;
