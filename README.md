@@ -75,6 +75,52 @@ pnpm exec wrangler secret put READ_TOKEN    # 只读：订阅 URL 用
 建议 `ADMIN_TOKEN`、`READ_TOKEN` 都用 UUID v4 或 32 字节随机 URL-safe 字符串，并且彼此不同。
 按机上报密钥在 WebUI 的“密钥”按钮生成，Worker 只保存它的 SHA-256。
 
+#### `ALLOW_LEGACY_TOKEN` 在哪里设置
+
+它不是密钥，是一个**普通变量**（值是 `1` / `0`），所以用 Dashboard 的 “Text” 类型或 `wrangler` 的 `vars` 都行，
+只有 `wrangler.toml` 里的 `[vars]` 才算“随部署一起下发”。
+
+Dashboard：
+
+```text
+Workers & Pages → sbsub → Settings → Variables and Secrets → Add
+  Type: Text（不要选 Secret）
+  Variable name: ALLOW_LEGACY_TOKEN
+  Value: 0
+→ Save and deploy
+```
+
+命令行（变量不是敏感信息，但用 secret 也能被 `env` 读到）：
+
+```bash
+pnpm exec wrangler secret put ALLOW_LEGACY_TOKEN   # 输入 0
+```
+
+或者在 `wrangler.toml` 里固定下来，随每次 `deploy` 生效：
+
+```toml
+[vars]
+ALLOW_LEGACY_TOKEN = "0"
+```
+
+判断逻辑很简单：只有值**恰好等于 `"0"`** 才算关闭旧 token；不设、空值、`"false"`、`"off"` 都仍按“开启兼容”处理。
+改完访问 `https://<worker>/health`，`roles.legacy_token` 应该变成 `false`。
+
+#### 迁移顺序（重要）
+
+`ALLOW_LEGACY_TOKEN=0` 会**同时切断**旧 `TOKEN` 的读取和上报。现在机队还在用旧 token 上报，直接关掉会立刻停更，所以按这个顺序：
+
+1. 先给每台机器在 WebUI 生成按机密钥（机器行右侧“密钥”），只显示一次，存好；
+2. 把这些机器的上报密钥换成新值（`sub_report_token` / 上报脚本的 `Authorization`），确认 `/api/v1/machines` 里 `updated_at` 还在更新；
+3. 把客户端订阅 URL 从 `/sub/<旧TOKEN>` 换成 `/sub/<READ_TOKEN>`；
+4. 最后才设 `ALLOW_LEGACY_TOKEN=0`，并删除 Worker 里的旧 `TOKEN` secret：
+
+```bash
+pnpm exec wrangler secret delete TOKEN
+```
+
+需要回滚时，删掉这个变量（或设为 `1`）即可恢复旧 token，无需改代码。
+
 ### 3. 部署
 
 ```bash
