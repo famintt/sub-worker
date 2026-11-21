@@ -1,5 +1,12 @@
 # 改成你自己的 Worker 名称
 name = "sub-worker"
+
+# 需要设置的 Secrets（wrangler secret put NAME）：
+#   ADMIN_TOKEN   管理密钥（WebUI / 管理接口）
+#   READ_TOKEN    订阅读取密钥
+#   REPORT_TOKEN  可选：全局上报密钥
+#   TOKEN         可选：旧版共享密钥（兼容期），迁移完删掉并把 ALLOW_LEGACY_TOKEN 设为 "0"
+# 可选变量：ALLOW_LEGACY_TOKEN = "0"  彻底禁用旧 TOKEN
 main = "src/index.js"
 compatibility_date = "2026-10-21"
 workers_dev = true

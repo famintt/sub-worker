@@ -6,3 +6,6 @@ dist/
 *.log
 *.local
 .DS_Store
+
+.secrets.txt
+.wrangler.deploy.toml

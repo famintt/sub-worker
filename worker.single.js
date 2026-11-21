@@ -1,33 +1,38 @@
 // sub-worker single-file build
 // 直接粘贴到 Cloudflare Dashboard -> Workers & Pages -> 你的 Worker -> Edit code。
-// 变量模式：在 Settings -> Variables and Secrets 设置一个 TOKEN（Secret）。
+// Secrets：ADMIN_TOKEN（管理）、READ_TOKEN（订阅），可选 REPORT_TOKEN。
+// 迁移期可保留旧 TOKEN；设 ALLOW_LEGACY_TOKEN=0 后旧 TOKEN 失效。
 // 对外域名由请求 Origin 自动决定，无需配置。
 // KV 绑定变量名必须是 SUBS。
 
 /**
- * sub-worker
+ * sub-worker v2.0.0
  *
- * 固定订阅入口 + 多机器自动上报 + WebUI 节点编辑/排序 + 客户端格式适配
+ * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
- * 上报：POST /api/v1/report/:machine         Bearer TOKEN，body 为 base64 订阅
- * 读取：GET  /sub/:machine/:token           单机
- *       GET  /sub/all/:token                 全部机器
- *       GET  /sub/:token                     全部机器简写
+ * 权限（SW-01）
+ *   ADMIN_TOKEN     管理：WebUI + /api/v1/* 全部管理接口（不进入任何订阅 URL）
+ *   READ_TOKEN      只读：/sub/... 订阅读取
+ *   每机上报密钥    POST /api/v1/report/:machine，只能在授权的那台机器上写
+ *   REPORT_TOKEN    可选全局上报密钥（迁移期兼容）
+ *   TOKEN           旧共享密钥，ALLOW_LEGACY_TOKEN=0 时彻底禁用
+ *
+ * 存储（SW-03/SW-09：自动快照与手工覆盖分开，互不覆盖）
+ *   report:<machine>    { machine, content, hash, bytes, updated_at }
+ *   manual:<machine>    { machine, nodes, updated_at }
+ *   tokenhash:<machine> sha256(按机上报密钥)
+ *   meta:machine_order  [machine...]
+ *   兼容读取旧版 sub:<machine>
+ *
+ * 读取：GET /sub/:machine/:token  |  GET /sub/all/:token  |  GET /sub/:token
  * 格式：?format=clash|singbox|base64，或 ?clash / ?singbox / ?b64
- * WebUI：GET /ui/:token
- * API：GET/PUT /api/v1/nodes/:machine
- *      POST /api/v1/machines/:machine/reset
- *
- * KV：
- *   sub:<machine> -> {
- *     machine, content, hash, bytes, updated_at,
- *     nodes: [{id, name, link, protocol, order}],
- *     manual: boolean
- *   }
+ * WebUI：GET /ui
  */
 
-const VERSION = "1.1.4";
+const VERSION = "2.0.0";
 const MAX_BODY = 512 * 1024;
+const MAX_NODES = 500;
+const MAX_LINK = 8192;
 const MACHINE_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 const UI_HTML = `<!doctype html>
@@ -37,29 +42,57 @@ const UI_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>sub-worker 节点管理</title>
 <style>
-:root{--bg:#ffffff;--card:#ffffff;--line:#dfe6ef;--ink:#1f2937;--sub:#64748b;--acc:#2563eb;--ok:#15803d;--err:#dc2626;--input:#ffffff}
-*{box-sizing:border-box}body{margin:0;background:#ffffff;color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
-.wrap{max-width:1180px;margin:28px auto 50px;padding:0 18px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
+:root{--bg:#fff;--line:#dfe6ef;--ink:#1f2937;--sub:#64748b;--acc:#2563eb;--ok:#15803d;--err:#dc2626}
+*{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Microsoft YaHei",sans-serif}
+.wrap{max-width:1180px;margin:28px auto 60px;padding:0 18px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
 h1{font-size:25px;margin:0}.ver{color:var(--acc);font:12px ui-monospace,Consolas,monospace;border:1px solid var(--line);padding:3px 8px;border-radius:8px}
-.card{background:#ffffff;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(15,23,42,.06)}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:18px;box-shadow:0 1px 4px rgba(15,23,42,.06)}
 .card h2{font-size:17px;margin:0 0 12px}.tip{font-size:12px;color:var(--sub);font-weight:400}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.row label{color:var(--sub);font-size:13px}
-select,input,button{font:14px inherit}select,input{background:var(--input);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 10px;outline:none}
-select:focus,input:focus{border-color:var(--acc)}button{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#f1f5f9;color:var(--ink)}
+select,input,button,textarea{font:14px inherit}select,input,textarea{background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 10px;outline:none}
+textarea{width:100%;min-height:96px;font:12px ui-monospace,Consolas,monospace}
+select:focus,input:focus,textarea:focus{border-color:var(--acc)}
+button{cursor:pointer;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:#f1f5f9;color:var(--ink)}
 button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}button.danger{color:var(--err)}
-button:disabled{opacity:.4;cursor:not-allowed}.nodes{margin-top:14px;display:grid;gap:8px}.node{display:grid;grid-template-columns:34px 1fr 180px 34px 34px 34px;gap:8px;align-items:center}
+button:disabled{opacity:.4;cursor:not-allowed}
+.nodes{margin-top:14px;display:grid;gap:8px}.node{display:grid;grid-template-columns:34px 1fr 180px 34px 34px 34px;gap:8px;align-items:center}
 .node .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.node input.link{font:12px ui-monospace,Consolas,monospace;min-width:0}
-.node input.name{font-size:13px}.node button{padding:6px 8px}.status{margin-top:12px;min-height:22px;font-size:13px;color:var(--sub)}.status.ok{color:var(--ok)}.status.err{color:var(--err)}
-.machine-list{display:grid;gap:7px;margin-top:12px}.machine{display:grid;grid-template-columns:34px 1fr 90px 34px 34px 70px 34px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
-.machine .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}.machine .mname{font-weight:600}.machine .mcount{font-size:12px;color:var(--sub)}.machine button{padding:5px 7px}.machine .edit{font-size:12px;padding:5px 8px}
-code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-all}.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
+.node input.name{font-size:13px}.node button{padding:6px 8px}
+.status{margin-top:12px;min-height:22px;font-size:13px;color:var(--sub)}.status.ok{color:var(--ok)}.status.err{color:var(--err)}
+.machine-list{display:grid;gap:7px;margin-top:12px}
+.machine{display:grid;grid-template-columns:34px 1fr 96px 34px 34px 70px 34px 60px 34px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#f8fafc}
+.machine .idx{color:var(--sub);font:12px ui-monospace,Consolas,monospace;text-align:center}
+.machine .mname{font-weight:600;word-break:break-all}.machine .mcount{font-size:12px;color:var(--sub)}
+.machine .badge{font-size:11px;color:#b45309;border:1px solid #fcd34d;background:#fffbeb;border-radius:999px;padding:1px 7px;margin-left:6px}
+.machine button{padding:5px 7px}.machine .edit{font-size:12px;padding:5px 8px}.machine .tok{font-size:12px;padding:5px 8px}
+code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-all}
+.subrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0}.subrow code{flex:1;min-width:260px}
 .hint{color:var(--sub);font-size:12px;line-height:1.7}.empty{color:var(--sub);padding:20px 0;text-align:center}
-@media(max-width:850px){.node{grid-template-columns:28px 1fr;padding-bottom:8px;border-bottom:1px dashed var(--line)}.node input.name{grid-column:2}.node button{grid-row:2}.node .idx{grid-row:1/span 2}}
+#login{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:9}
+#login .box{background:#fff;border-radius:16px;padding:22px;width:min(420px,92vw);box-shadow:0 12px 40px rgba(15,23,42,.25)}
+#login h3{margin:0 0 10px;font-size:18px}#login input{width:100%;margin:8px 0 14px}
+.hidden{display:none!important}
+@media(max-width:900px){.node{grid-template-columns:28px 1fr}.node input.name{grid-column:2}.node button{grid-row:2}.machine{grid-template-columns:28px 1fr 34px 34px 34px 34px}}
 </style>
 </head>
 <body>
+<div id="login"><div class="box">
+<h3>sub-worker 管理登录</h3>
+<div class="hint">管理密钥不会出现在 URL 里；只保存在本浏览器 sessionStorage。</div>
+<input id="login-token" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password">
+<div class="row"><button id="login-go" class="primary" type="button">登录</button><span id="login-msg" class="status"></span></div>
+</div></div>
+
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">先调整机器顺序，再编辑每台机器的节点顺序；保存后订阅自动按顺序生成。</div></div><span class="ver" id="version">v1.1.4</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.0</span></div>
+
+<section class="card">
+<h2>新增机器 <span class="tip">手动添加的机器不依赖自动上报</span></h2>
+<div class="row"><label>机器名</label><input id="new-machine" placeholder="例如 hk-opt-dandan" size="26"><label>节点链接</label></div>
+<textarea id="new-links" placeholder="每行一个链接，可留空先建空机器&#10;vless://...&#10;tuic://..."></textarea>
+<div class="row" style="margin-top:10px"><button id="create-machine" class="primary" type="button">创建机器</button><span id="create-status" class="status"></span></div>
+<div class="hint">机器名只允许小写字母、数字和连字符。创建后可在下方编辑节点，或用“密钥”按钮生成该机的上报密钥。</div>
+</section>
 
 <section class="card">
 <h2>机器排序 <span class="tip">这里决定合并订阅里机器出现的先后顺序</span></h2>
@@ -81,19 +114,19 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 <div class="subrow"><span class="tip">通用 base64</span><code id="url-base"></code><button data-copy="url-base" type="button">复制</button></div>
 <div class="subrow"><span class="tip">Clash / Mihomo</span><code id="url-clash"></code><button data-copy="url-clash" type="button">复制</button></div>
 <div class="subrow"><span class="tip">sing-box</span><code id="url-singbox"></code><button data-copy="url-singbox" type="button">复制</button></div>
-<div class="hint">也可以显式使用 <code>?format=clash</code>、<code>?format=singbox</code>、<code>?format=base64</code>。手动保存后，机器自动上报不会覆盖你编辑的节点；点“恢复自动上报”才会恢复。</div>
+<div class="hint">手动保存后，机器自动上报不会覆盖你编辑的节点；点“恢复自动上报”才会回到最近一次自动快照。</div>
 </section>
 </div>
 <script>
 (function () {
   "use strict";
-  var TOKEN = decodeURIComponent((location.pathname.split("/").pop() || ""));
-  var state = { machines: [], current: "", nodes: [] };
+  var STORE = "sw_admin_token";
+  var state = { machines: [], current: "", nodes: [], manual: false, settings: {} };
   var $ = function (id) { return document.getElementById(id); };
-
+  function tok() { return sessionStorage.getItem(STORE) || ""; }
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({}, opts.headers || {}, { Authorization: "Bearer " + TOKEN });
+    opts.headers = Object.assign({}, opts.headers || {}, { Authorization: "Bearer " + tok() });
     return fetch("/api/v1" + path, opts).then(function (r) {
       return r.text().then(function (text) {
         var data;
@@ -103,8 +136,21 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
       });
     });
   }
-  function setStatus(text, ok) {
-    var el = $("status"); el.textContent = text || ""; el.className = "status" + (ok === true ? " ok" : ok === false ? " err" : "");
+  function setStatus(el, text, ok) {
+    var node = $(el); node.textContent = text || "";
+    node.className = "status" + (ok === true ? " ok" : ok === false ? " err" : "");
+  }
+  function showLogin(show) { $("login").className = show ? "" : "hidden"; }
+
+  function renderUrls() {
+    var base = location.origin;
+    var rt = state.settings.read_token || "";
+    var urls = {
+      "url-base": base + "/sub/" + encodeURIComponent(rt),
+      "url-clash": base + "/sub/" + encodeURIComponent(rt) + "?format=clash",
+      "url-singbox": base + "/sub/" + encodeURIComponent(rt) + "?format=singbox"
+    };
+    Object.keys(urls).forEach(function (id) { $(id).textContent = urls[id]; });
   }
   function nodeRow(node, index) {
     var row = document.createElement("div"); row.className = "node";
@@ -114,100 +160,128 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
     var up = document.createElement("button"); up.type = "button"; up.textContent = "↑"; up.title = "上移";
     var down = document.createElement("button"); down.type = "button"; down.textContent = "↓"; down.title = "下移";
     var del = document.createElement("button"); del.type = "button"; del.className = "danger"; del.textContent = "×"; del.title = "删除";
-    up.onclick = function () { if (index > 0) { var t = state.nodes[index - 1]; state.nodes[index - 1] = state.nodes[index]; state.nodes[index] = t; render(); } };
-    down.onclick = function () { if (index < state.nodes.length - 1) { var t = state.nodes[index + 1]; state.nodes[index + 1] = state.nodes[index]; state.nodes[index] = t; render(); } };
-    del.onclick = function () { state.nodes.splice(index, 1); render(); };
+    up.onclick = function () { if (index > 0) { var t = state.nodes[index - 1]; state.nodes[index - 1] = state.nodes[index]; state.nodes[index] = t; renderNodes(); } };
+    down.onclick = function () { if (index < state.nodes.length - 1) { var t = state.nodes[index + 1]; state.nodes[index + 1] = state.nodes[index]; state.nodes[index] = t; renderNodes(); } };
+    del.onclick = function () { state.nodes.splice(index, 1); renderNodes(); };
     link.oninput = function () { state.nodes[index].link = link.value; };
     name.oninput = function () { state.nodes[index].name = name.value; };
     row.appendChild(idx); row.appendChild(link); row.appendChild(name); row.appendChild(up); row.appendChild(down); row.appendChild(del);
     return row;
   }
-  function render() {
+  function renderNodes() {
     var box = $("nodes"); box.innerHTML = "";
-    if (!state.nodes.length) { var e = document.createElement("div"); e.className = "empty"; e.textContent = "暂无节点，点击下方添加"; box.appendChild(e); return; }
+    if (!state.current) { box.innerHTML = '<div class="empty">先选择或新增一台机器</div>'; return; }
+    if (!state.nodes.length) { box.innerHTML = '<div class="empty">当前没有节点，点“+ 添加节点”</div>'; return; }
     state.nodes.forEach(function (n, i) { box.appendChild(nodeRow(n, i)); });
   }
   function renderMachines() {
-    var sel = $("machine"); sel.innerHTML = "";
-    if (!state.machines.length) { var o = document.createElement("option"); o.value = ""; o.textContent = "暂无机器上报"; sel.appendChild(o); return; }
-    state.machines.forEach(function (m) { var o = document.createElement("option"); o.value = m.machine; o.textContent = m.machine + (m.manual ? "（手动）" : ""); sel.appendChild(o); });
-    if (!state.current || !state.machines.some(function (m) { return m.machine === state.current; })) state.current = state.machines[0].machine;
-    sel.value = state.current;
-  }
-  function renderMachineList() {
     var box = $("machine-list"); box.innerHTML = "";
-    if (!state.machines.length) { var e = document.createElement("div"); e.className = "empty"; e.textContent = "暂无机器上报"; box.appendChild(e); return; }
-    state.machines.forEach(function (m, index) {
+    if (!state.machines.length) { box.innerHTML = '<div class="empty">还没有机器</div>'; }
+    state.machines.forEach(function (m, i) {
       var row = document.createElement("div"); row.className = "machine";
-      var idx = document.createElement("div"); idx.className = "idx"; idx.textContent = String(index + 1);
-      var name = document.createElement("div"); name.className = "mname"; name.textContent = m.machine + (m.manual ? "（手动）" : "");
-      var count = document.createElement("div"); count.className = "mcount"; count.textContent = (m.nodes || 0) + " 节点";
-      var up = document.createElement("button"); up.type = "button"; up.textContent = "↑"; up.title = "上移"; up.disabled = index === 0;
-      var down = document.createElement("button"); down.type = "button"; down.textContent = "↓"; down.title = "下移"; down.disabled = index === state.machines.length - 1;
-      var edit = document.createElement("button"); edit.type = "button"; edit.className = "edit"; edit.textContent = "编辑节点";
-      up.onclick = function () { if (index > 0) { var t = state.machines[index - 1]; state.machines[index - 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
-      down.onclick = function () { if (index < state.machines.length - 1) { var t = state.machines[index + 1]; state.machines[index + 1] = state.machines[index]; state.machines[index] = t; renderMachineList(); renderMachines(); } };
-      edit.onclick = function () { state.current = m.machine; $("machine").value = m.machine; loadNodes(); };
-      var del = document.createElement("button");
-      del.type = "button"; del.className = "danger"; del.textContent = "×"; del.title = "删除机器";
-      del.onclick = function () {
-        if (!window.confirm("确定删除机器 " + m.machine + "？该机器的所有节点也会从订阅中移除。")) return;
-        api("/machines/" + encodeURIComponent(m.machine), { method: "DELETE" }).then(function () {
-          setStatus("已删除机器：" + m.machine, true);
-          return loadMachines();
-        }).catch(function (err) {
-          setStatus("删除失败：" + err.message, false);
-        });
+      var idx = document.createElement("div"); idx.className = "idx"; idx.textContent = String(i + 1);
+      var name = document.createElement("div"); name.className = "mname"; name.textContent = m.machine;
+      if (m.manual) { var b = document.createElement("span"); b.className = "badge"; b.textContent = "手动"; name.appendChild(b); }
+      var count = document.createElement("div"); count.className = "mcount"; count.textContent = m.nodes + " 节点";
+      var up = document.createElement("button"); up.type = "button"; up.textContent = "↑"; up.title = "上移";
+      var down = document.createElement("button"); down.type = "button"; down.textContent = "↓"; down.title = "下移";
+      var edit = document.createElement("button"); edit.type = "button"; edit.className = "edit"; edit.textContent = "编辑";
+      var token = document.createElement("button"); token.type = "button"; token.className = "tok"; token.textContent = "密钥"; token.title = "生成/轮换该机上报密钥";
+      var del = document.createElement("button"); del.type = "button"; del.className = "danger"; del.textContent = "×"; del.title = "删除机器";
+      up.onclick = function () { if (i > 0) { var t = state.machines[i - 1]; state.machines[i - 1] = state.machines[i]; state.machines[i] = t; renderMachines(); } };
+      down.onclick = function () { if (i < state.machines.length - 1) { var t = state.machines[i + 1]; state.machines[i + 1] = state.machines[i]; state.machines[i] = t; renderMachines(); } };
+      edit.onclick = function () { selectMachine(m.machine); };
+      token.onclick = function () {
+        if (!confirm("为 " + m.machine + " 生成新的上报密钥？旧密钥立即失效。")) return;
+        api("/machines/" + encodeURIComponent(m.machine) + "/token", { method: "POST" })
+          .then(function (d) { window.prompt("上报密钥（只显示这一次，请保存）", d.token); loadMachines(); })
+          .catch(function (e) { setStatus("order-status", "生成失败：" + e.message, false); });
       };
-      row.appendChild(idx); row.appendChild(name); row.appendChild(count); row.appendChild(up); row.appendChild(down); row.appendChild(edit); row.appendChild(del);
+      del.onclick = function () {
+        if (!confirm("删除机器 " + m.machine + " 及其节点与上报密钥？")) return;
+        api("/machines/" + encodeURIComponent(m.machine), { method: "DELETE" })
+          .then(function () { if (state.current === m.machine) { state.current = ""; state.nodes = []; renderNodes(); } loadMachines(); })
+          .catch(function (e) { setStatus("order-status", "删除失败：" + e.message, false); });
+      };
+      row.appendChild(idx); row.appendChild(name); row.appendChild(count);
+      row.appendChild(up); row.appendChild(down); row.appendChild(edit); row.appendChild(token); row.appendChild(del);
       box.appendChild(row);
     });
-  }
-  function renderUrls() {
-    var base = location.origin + "/sub/all/" + encodeURIComponent(TOKEN);
-    $("url-base").textContent = base;
-    $("url-clash").textContent = base + "?format=clash";
-    $("url-singbox").textContent = base + "?format=singbox";
-  }
-  function loadNodes() {
-    if (!state.current) { state.nodes = []; render(); return Promise.resolve(); }
-    setStatus("加载中...");
-    return api("/nodes/" + encodeURIComponent(state.current)).then(function (data) {
-      state.nodes = (data.nodes || []).map(function (n) { return { link: n.link || "", name: n.name || "" }; });
-      render(); setStatus("已加载 " + state.nodes.length + " 个节点");
-    }).catch(function (e) { setStatus("加载失败：" + e.message, false); });
+    var sel = $("machine"); sel.innerHTML = "";
+    state.machines.forEach(function (m) {
+      var o = document.createElement("option"); o.value = m.machine; o.textContent = m.machine; sel.appendChild(o);
+    });
+    sel.value = state.current || (state.machines[0] ? state.machines[0].machine : "");
   }
   function loadMachines() {
-    return api("/machines").then(function (data) {
-      state.machines = data.machines || []; renderMachines(); renderMachineList(); return loadNodes();
-    }).catch(function (e) { setStatus("加载失败：" + e.message, false); });
-  }
-  $("machine").onchange = function () { state.current = this.value; loadNodes(); };
-  $("save-machine-order").onclick = function () {
-    var machines = state.machines.map(function (m) { return m.machine; });
-    var el = $("order-status"); el.textContent = "保存中..."; el.className = "status";
-    api("/machines/order", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ machines: machines }) })
-      .then(function () { el.textContent = "机器顺序已保存"; el.className = "status ok"; return loadMachines(); })
-      .catch(function (e) { el.textContent = "保存失败：" + e.message; el.className = "status err"; });
-  };
-  $("reload").onclick = loadMachines;
-  $("add").onclick = function () { state.nodes.push({ link: "", name: "" }); render(); };
-  $("save").onclick = function () {
-    if (!state.current) return setStatus("没有可保存的机器", false);
-    var nodes = state.nodes.filter(function (n) { return String(n.link || "").trim(); }).map(function (n, i) {
-      return { link: String(n.link).trim(), name: String(n.name || "").trim(), order: i };
+    return api("/machines").then(function (d) {
+      state.machines = d.machines || [];
+      if (!state.current && state.machines.length) state.current = state.machines[0].machine;
+      renderMachines(); renderNodes();
+      if (state.current) return selectMachine(state.current);
+    }).catch(function (e) {
+      if (/unauthorized|401/.test(e.message)) { sessionStorage.removeItem(STORE); showLogin(true); return; }
+      setStatus("order-status", "加载失败：" + e.message, false);
     });
-    setStatus("保存中...");
+  }
+  function selectMachine(machine) {
+    state.current = machine;
+    $("machine").value = machine;
+    return api("/nodes/" + encodeURIComponent(machine)).then(function (d) {
+      state.nodes = (d.nodes || []).map(function (n) { return { link: n.link, name: n.name }; });
+      state.manual = Boolean(d.manual);
+      renderNodes();
+      setStatus("status", state.manual ? "当前是手动配置（自动上报不会覆盖）" : "当前来自自动上报", null);
+    }).catch(function (e) { setStatus("status", "读取失败：" + e.message, false); });
+  }
+  function createMachine() {
+    var machine = ($("new-machine").value || "").trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(machine)) { setStatus("create-status", "机器名只能用小写字母、数字、连字符", false); return; }
+    var links = ($("new-links").value || "").split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean);
+    api("/machines/" + encodeURIComponent(machine), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) })
+      .then(function () {
+        if (!links.length) return null;
+        return api("/nodes/" + encodeURIComponent(machine), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: links.map(function (l) { return { link: l }; }) }) });
+      })
+      .then(function () {
+        setStatus("create-status", "已创建 " + machine, true);
+        $("new-machine").value = ""; $("new-links").value = "";
+        state.current = machine;
+        return loadMachines();
+      })
+      .catch(function (e) { setStatus("create-status", "创建失败：" + e.message, false); });
+  }
+  $("login-go").onclick = function () {
+    var t = ($("login-token").value || "").trim();
+    if (!t) { setStatus("login-msg", "请输入管理密钥", false); return; }
+    sessionStorage.setItem(STORE, t);
+    api("/machines").then(function () { showLogin(false); setStatus("login-msg", "", null); boot(); })
+      .catch(function (e) { sessionStorage.removeItem(STORE); setStatus("login-msg", "登录失败：" + e.message, false); });
+  };
+  $("login-token").onkeydown = function (ev) { if (ev.key === "Enter") $("login-go").click(); };
+  $("machine").onchange = function () { selectMachine($("machine").value); };
+  $("reload").onclick = function () { if (state.current) selectMachine(state.current); };
+  $("add").onclick = function () { state.nodes.push({ link: "", name: "" }); renderNodes(); };
+  $("save").onclick = function () {
+    if (!state.current) return;
+    var nodes = state.nodes.map(function (n) { return { link: (n.link || "").trim(), name: (n.name || "").trim() }; }).filter(function (n) { return n.link; });
     api("/nodes/" + encodeURIComponent(state.current), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nodes: nodes }) })
-      .then(function (data) { setStatus("保存成功：" + data.nodes.length + " 个节点", true); return loadMachines(); })
-      .catch(function (e) { setStatus("保存失败：" + e.message, false); });
+      .then(function (d) { setStatus("status", "已保存：" + (d.nodes || []).length + " 个节点", true); state.manual = true; return loadMachines(); })
+      .catch(function (e) { setStatus("status", "保存失败：" + e.message, false); });
   };
   $("reset").onclick = function () {
     if (!state.current || !confirm("恢复后会用最近一次自动上报的节点覆盖手动配置，确定？")) return;
     api("/machines/" + encodeURIComponent(state.current) + "/reset", { method: "POST" })
-      .then(function () { setStatus("已恢复自动上报", true); return loadMachines(); })
-      .catch(function (e) { setStatus("恢复失败：" + e.message, false); });
+      .then(function () { setStatus("status", "已恢复自动上报", true); return loadMachines(); })
+      .catch(function (e) { setStatus("status", "恢复失败：" + e.message, false); });
   };
+  $("save-machine-order").onclick = function () {
+    var machines = state.machines.map(function (m) { return m.machine; });
+    api("/machines/order", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ machines: machines }) })
+      .then(function () { setStatus("order-status", "机器顺序已保存", true); })
+      .catch(function (e) { setStatus("order-status", "保存失败：" + e.message, false); });
+  };
+  $("create-machine").onclick = createMachine;
   document.addEventListener("click", function (ev) {
     var id = ev.target && ev.target.getAttribute("data-copy");
     if (!id) return;
@@ -215,7 +289,11 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
     var done = function () { var old = ev.target.textContent; ev.target.textContent = "已复制"; setTimeout(function () { ev.target.textContent = old; }, 1200); };
     if (navigator.clipboard) navigator.clipboard.writeText(text).then(done).catch(done); else done();
   });
-  renderUrls(); loadMachines();
+  function boot() {
+    api("/settings").then(function (d) { state.settings = d; renderUrls(); }).catch(function () {});
+    loadMachines();
+  }
+  if (tok()) { showLogin(false); boot(); } else { showLogin(true); }
 })();
 </script>
 </body>
@@ -227,7 +305,19 @@ export default {
     const path = url.pathname;
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
-    if (request.method === "GET" && path === "/health") return json({ ok: true, version: VERSION, time: new Date().toISOString() });
+    if (request.method === "GET" && path === "/health") {
+      return json({
+        ok: true,
+        version: VERSION,
+        roles: {
+          admin: Boolean(adminTokens(env).length),
+          read: Boolean(readTokens(env).length),
+          per_machine_report: true,
+          legacy_token: legacyAllowed(env),
+        },
+        time: new Date().toISOString(),
+      });
+    }
 
     if (request.method === "GET" && path === "/") {
       return json({
@@ -235,79 +325,101 @@ export default {
         version: VERSION,
         subscription_base: baseUrl(request),
         formats: ["base64", "clash", "singbox"],
-        ui: "/ui/:token",
+        ui: "/ui",
+        roles: ["admin", "read", "report(per-machine)"],
         endpoints: [
           "POST /api/v1/report/:machine",
           "GET /sub/:machine/:token",
           "GET /sub/all/:token",
           "GET /sub/:token",
-          "GET/PUT /api/v1/nodes/:machine",
+          "GET/POST /api/v1/machines/:machine",
+          "DELETE /api/v1/machines/:machine",
           "POST /api/v1/machines/:machine/reset",
+          "POST/DELETE /api/v1/machines/:machine/token",
+          "GET/PUT /api/v1/nodes/:machine",
           "GET/PUT /api/v1/machines/order",
           "GET /api/v1/machines",
+          "GET /api/v1/settings",
+          "GET /ui",
           "GET /health",
         ],
       });
     }
 
-    let m = path.match(/^\/ui\/([^/]+)$/);
-    if (m) {
-      if (request.method !== "GET") return methodNotAllowed("GET");
-      if (!authToken(env)) return missingConfig("TOKEN");
-      if (!checkToken(decodeURIComponent(m[1]), authToken(env))) return unauthorized();
+    // 管理 UI：不再把凭据放进 URL（SW-05）；旧的 /ui/:token 仍兼容，但要求是管理密钥。
+    if (request.method === "GET" && (path === "/ui" || /^\/ui\/[^/]+$/.test(path))) {
+      const m = path.match(/^\/ui\/([^/]+)$/);
+      if (m && !anyTokenMatch(decodeURIComponent(m[1]), adminTokens(env))) return unauthorized();
+      if (!adminTokens(env).length) return missingConfig("ADMIN_TOKEN");
       return html(UI_HTML);
     }
 
-    m = path.match(/^\/api\/v1\/report\/([^/]+)$/);
+    let m = path.match(/^\/api\/v1\/report\/([^/]+)$/);
     if (m) {
       if (request.method !== "POST") return methodNotAllowed("POST");
       return report(request, env, decodeURIComponent(m[1]));
     }
 
-    m = path.match(/^\/api\/v1\/nodes\/([^/]+)$/);
-    if (m) {
-      if (!authToken(env)) return missingConfig("TOKEN");
-      if (!checkBearer(request, authToken(env))) return unauthorized();
-      const machine = decodeURIComponent(m[1]);
-      if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
-      if (request.method === "GET") return getNodeConfig(env, machine);
-      if (request.method === "PUT") return putNodeConfig(request, env, machine);
-      return methodNotAllowed("GET, PUT");
-    }
+    // 以下全部是管理接口：只接受管理员凭据。
+    if (path.startsWith("/api/v1/")) {
+      if (!adminTokens(env).length) return missingConfig("ADMIN_TOKEN");
+      if (!isAdmin(request, env)) return unauthorized();
 
-    m = path.match(/^\/api\/v1\/machines\/([^/]+)\/reset$/);
-    if (m) {
-      if (!authToken(env)) return missingConfig("TOKEN");
-      if (!checkBearer(request, authToken(env))) return unauthorized();
-      if (request.method !== "POST") return methodNotAllowed("POST");
-      return resetMachine(env, decodeURIComponent(m[1]));
-    }
+      m = path.match(/^\/api\/v1\/settings$/);
+      if (m) {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return json({ ok: true, version: VERSION, read_token: readTokens(env)[0] || "", legacy_token: legacyAllowed(env) });
+      }
 
-    m = path.match(/^\/api\/v1\/machines\/order$/);
-    if (m) {
-      if (!authToken(env)) return missingConfig("TOKEN");
-      if (!checkBearer(request, authToken(env))) return unauthorized();
-      if (request.method === "GET") return json({ ok: true, machine_order: await getMachineOrder(env) });
-      if (request.method !== "PUT") return methodNotAllowed("GET, PUT");
-      return putMachineOrder(request, env);
-    }
+      m = path.match(/^\/api\/v1\/nodes\/([^/]+)$/);
+      if (m) {
+        const machine = decodeURIComponent(m[1]);
+        if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
+        if (request.method === "GET") return getNodeConfig(env, machine);
+        if (request.method === "PUT") return putNodeConfig(request, env, machine);
+        return methodNotAllowed("GET, PUT");
+      }
 
-    m = path.match(/^\/api\/v1\/machines(?:\/([^/]+))?$/);
-    if (m) {
-      if (!authToken(env)) return missingConfig("TOKEN");
-      if (!checkBearer(request, authToken(env))) return unauthorized();
-      if (request.method === "GET" && !m[1]) return listMachines(env);
-      if (request.method === "DELETE" && m[1]) return deleteMachine(env, decodeURIComponent(m[1]));
-      return methodNotAllowed("GET, DELETE");
+      m = path.match(/^\/api\/v1\/machines\/order$/);
+      if (m) {
+        if (request.method === "GET") return json({ ok: true, machine_order: await getMachineOrder(env) });
+        if (request.method !== "PUT") return methodNotAllowed("GET, PUT");
+        return putMachineOrder(request, env);
+      }
+
+      m = path.match(/^\/api\/v1\/machines\/([^/]+)\/reset$/);
+      if (m) {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return resetMachine(env, decodeURIComponent(m[1]));
+      }
+
+      m = path.match(/^\/api\/v1\/machines\/([^/]+)\/token$/);
+      if (m) {
+        const machine = decodeURIComponent(m[1]);
+        if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
+        if (request.method === "POST") return mintMachineToken(env, machine);
+        if (request.method === "GET") return getMachineToken(env, machine);
+        if (request.method === "DELETE") return revokeMachineToken(env, machine);
+        return methodNotAllowed("POST, GET, DELETE");
+      }
+
+      m = path.match(/^\/api\/v1\/machines(?:\/([^/]+))?$/);
+      if (m) {
+        if (!m[1]) {
+          if (request.method !== "GET") return methodNotAllowed("GET");
+          return listMachines(env);
+        }
+        const machine = decodeURIComponent(m[1]);
+        if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
+        if (request.method === "POST") return createMachine(env, machine);
+        if (request.method === "DELETE") return deleteMachine(env, machine);
+        return methodNotAllowed("POST, DELETE");
+      }
+
+      return json({ ok: false, error: "not found" }, 404);
     }
 
     m = path.match(/^\/sub\/all\/([^/]+)$/);
-    if (m) {
-      if (request.method !== "GET") return methodNotAllowed("GET");
-      return getAll(env, decodeURIComponent(m[1]), request);
-    }
-
-    m = path.match(/^\/sub\/([^/]+)$/);
     if (m) {
       if (request.method !== "GET") return methodNotAllowed("GET");
       return getAll(env, decodeURIComponent(m[1]), request);
@@ -319,122 +431,276 @@ export default {
       return getOne(env, decodeURIComponent(m[1]), decodeURIComponent(m[2]), request);
     }
 
+    m = path.match(/^\/sub\/([^/]+)$/);
+    if (m) {
+      if (request.method !== "GET") return methodNotAllowed("GET");
+      return getAll(env, decodeURIComponent(m[1]), request);
+    }
+
     return json({ ok: false, error: "not found" }, 404);
   },
 };
 
-function authToken(env) { return (env && env.TOKEN) || ""; }
-function baseUrl(request) { return new URL(request.url).origin; }
+/* ---------------- 权限 ---------------- */
+
+function legacyAllowed(env) { return String((env && env.ALLOW_LEGACY_TOKEN) || "1") !== "0"; }
+function adminTokens(env) {
+  const out = [];
+  if (env && env.ADMIN_TOKEN) out.push(env.ADMIN_TOKEN);
+  if (legacyAllowed(env) && env && env.TOKEN) out.push(env.TOKEN);
+  return out;
+}
+function readTokens(env) {
+  const out = [];
+  if (env && env.READ_TOKEN) out.push(env.READ_TOKEN);
+  if (legacyAllowed(env) && env && env.TOKEN) out.push(env.TOKEN);
+  return out;
+}
+function bearerOf(request) {
+  const header = request.headers.get("authorization") || "";
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : "";
+}
+function isAdmin(request, env) { return anyTokenMatch(bearerOf(request), adminTokens(env)); }
+function isReaderToken(token, env) { return anyTokenMatch(token, readTokens(env)); }
+async function reportAllowed(env, request, machine) {
+  const token = bearerOf(request);
+  if (!token) return false;
+  // 管理员是读取/上报权限的超集，便于 WebUI 与运维直接补报。
+  if (isAdmin(request, env)) return true;
+  const hash = await env.SUBS.get(`tokenhash:${machine}`);
+  if (hash && checkToken(await sha256Hex(token), hash)) return true;
+  if (env.REPORT_TOKEN && checkToken(token, env.REPORT_TOKEN)) return true;
+  if (legacyAllowed(env) && env.TOKEN && checkToken(token, env.TOKEN)) return true;
+  return false;
+}
+
+/* ---------------- KV helpers (SW-08 分页) ---------------- */
+
+async function listAllKeys(env, prefix) {
+  const out = [];
+  let cursor = undefined;
+  for (let page = 0; page < 100; page++) {
+    const res = await env.SUBS.list(cursor ? { prefix, cursor } : { prefix });
+    for (const key of res.keys) out.push(key.name);
+    if (res.list_complete || !res.cursor) break;
+    cursor = res.cursor;
+  }
+  return out;
+}
+
+async function loadReport(env, machine) {
+  let rec = await env.SUBS.get(`report:${machine}`, { type: "json" });
+  if (rec) return rec;
+  const legacy = await env.SUBS.get(`sub:${machine}`, { type: "json" });
+  if (!legacy) return null;
+  return {
+    machine,
+    content: legacy.content || "",
+    hash: legacy.hash || "",
+    bytes: legacy.bytes || 0,
+    updated_at: legacy.updated_at || "",
+    legacy_manual: Boolean(legacy.manual),
+    legacy_nodes: Array.isArray(legacy.nodes) ? legacy.nodes : [],
+  };
+}
+
+async function loadManual(env, machine) {
+  const rec = await env.SUBS.get(`manual:${machine}`, { type: "json" });
+  if (rec && Array.isArray(rec.nodes)) return rec;
+  const legacy = await loadReport(env, machine);
+  if (legacy && legacy.legacy_manual) return { machine, nodes: legacy.legacy_nodes || [], updated_at: legacy.updated_at };
+  return null;
+}
+
+async function machineSet(env) {
+  const names = new Set();
+  for (const prefix of ["report:", "manual:", "sub:"]) {
+    for (const key of await listAllKeys(env, prefix)) {
+      const name = key.slice(prefix.length);
+      if (MACHINE_RE.test(name)) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+async function nodesOf(env, machine) {
+  const manual = await loadManual(env, machine);
+  if (manual) {
+    const nodes = manual.nodes.slice();
+    nodes.sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0));
+    return nodes.map((n, i) => ({ ...n, _sort: i }));
+  }
+  const rep = await loadReport(env, machine);
+  const nodes = rep ? await normalizeNodes(splitLinks(decodeSafe(rep.content)), []) : [];
+  nodes.sort((a, b) => protocolRank(a) - protocolRank(b) || (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.name).localeCompare(String(b.name)));
+  return nodes.map((n, i) => ({ ...n, _sort: i }));
+}
+
+/* ---------------- 订阅 ---------------- */
 
 async function report(request, env, machine) {
-  if (!authToken(env)) return missingConfig("TOKEN");
-  if (!checkBearer(request, authToken(env))) return unauthorized();
   if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
+  if (!(await reportAllowed(env, request, machine))) return unauthorized();
 
-  const body = await request.text();
-  if (body.length > MAX_BODY) return json({ ok: false, error: "subscription too large" }, 413);
+  const limited = await readLimitedText(request, MAX_BODY);
+  if (limited.tooLarge) return json({ ok: false, error: "subscription too large" }, 413);
+  const body = limited.text;
   const content = body.replace(/\s+/g, "");
   if (!content || content.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(content)) return json({ ok: false, error: "body must be base64 text" }, 400);
   let decoded;
   try { decoded = decodeBase64(content); } catch { return json({ ok: false, error: "invalid base64" }, 400); }
-
-  const key = `sub:${machine}`;
-  const hash = await sha256Hex(content);
-  const old = await env.SUBS.get(key, { type: "json" });
-  if (old && old.hash === hash && !old.manual) {
-    return json({ ok: true, changed: false, machine, bytes: content.length, hash, updated_at: old.updated_at });
-  }
+  if (decoded.length > MAX_BODY) return json({ ok: false, error: "decoded content too large" }, 413);
   const links = splitLinks(decoded);
-  const nodes = old && old.manual && Array.isArray(old.nodes)
-    ? old.nodes
-    : await normalizeNodes(links, old && Array.isArray(old.nodes) ? old.nodes : []);
+  if (links.length > MAX_NODES) return json({ ok: false, error: "too many nodes" }, 413);
+  if (links.some((l) => l.length > MAX_LINK)) return json({ ok: false, error: "node link too long" }, 413);
+
+  const hash = await sha256Hex(content);
+  const old = await env.SUBS.get(`report:${machine}`, { type: "json" });
+  const manual = await loadManual(env, machine);
+  if (old && old.hash === hash) {
+    return json({ ok: true, changed: false, machine, bytes: content.length, hash, manual: Boolean(manual), updated_at: old.updated_at });
+  }
   const updatedAt = new Date().toISOString();
-  const record = { machine, content, hash, bytes: content.length, updated_at: updatedAt, nodes, manual: Boolean(old && old.manual) };
-  await env.SUBS.put(key, JSON.stringify(record));
-  return json({ ok: true, changed: true, machine, bytes: content.length, hash, nodes: nodes.length, manual: record.manual, updated_at: updatedAt });
+  // 自动快照单独存 report:<machine>；手工覆盖在 manual:<machine>，互不覆盖（SW-03/SW-09）。
+  await env.SUBS.put(`report:${machine}`, JSON.stringify({ machine, content, hash, bytes: content.length, updated_at: updatedAt }));
+  const derived = await normalizeNodes(links, []);
+  return json({ ok: true, changed: true, machine, bytes: content.length, hash, nodes: derived.length, manual: Boolean(manual), updated_at: updatedAt });
 }
 
 async function getOne(env, machine, token, request) {
-  if (!authToken(env)) return missingConfig("TOKEN");
-  if (!checkToken(token, authToken(env))) return unauthorized();
+  if (!readTokens(env).length) return missingConfig("READ_TOKEN");
+  if (!isReaderToken(token, env)) return unauthorized();
   if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
-  const record = await env.SUBS.get(`sub:${machine}`, { type: "json" });
-  if (!record) return json({ ok: false, error: "subscription not found" }, 404);
-  const nodes = await nodesOf(record);
-  return subResponse(nodes, request, { "x-machine": machine, "x-updated-at": record.updated_at });
+  const rep = await loadReport(env, machine);
+  const manual = await loadManual(env, machine);
+  if (!rep && !manual) return json({ ok: false, error: "subscription not found" }, 404);
+  const nodes = await nodesOf(env, machine);
+  return subResponse(nodes, request, { "x-machine": machine, "x-updated-at": (manual && manual.updated_at) || (rep && rep.updated_at) || "" });
 }
 
 async function getAll(env, token, request) {
-  if (!authToken(env)) return missingConfig("TOKEN");
-  if (!checkToken(token, authToken(env))) return unauthorized();
-  const list = await env.SUBS.list({ prefix: "sub:" });
+  if (!readTokens(env).length) return missingConfig("READ_TOKEN");
+  if (!isReaderToken(token, env)) return unauthorized();
+  const names = await machineSet(env);
   const order = await getMachineOrder(env);
   const rank = new Map(order.map((m, i) => [m, i]));
   const all = [];
   let manual = 0;
-  for (const key of list.keys) {
-    const record = await env.SUBS.get(key.name, { type: "json" });
-    if (!record) continue;
-    if (record.manual) manual++;
-    const nodes = await nodesOf(record);
-    nodes.forEach((n) => all.push({ ...n, machine: record.machine }));
+  for (const machine of names) {
+    if (await loadManual(env, machine)) manual++;
+    const nodes = await nodesOf(env, machine);
+    nodes.forEach((n) => all.push({ ...n, machine }));
   }
   all.sort((a, b) => {
     const ar = rank.has(a.machine) ? rank.get(a.machine) : defaultMachineRank(a.machine);
     const br = rank.has(b.machine) ? rank.get(b.machine) : defaultMachineRank(b.machine);
     return ar - br || (Number(a._sort) || 0) - (Number(b._sort) || 0) || String(a.machine).localeCompare(String(b.machine)) || String(a.name).localeCompare(String(b.name));
   });
-  return subResponse(all, request, { "x-machines": String(list.keys.length), "x-nodes": String(all.length), "x-manual-machines": String(manual), "x-machine-order": order.join(",") });
+  return subResponse(all, request, { "x-machines": String(names.length), "x-nodes": String(all.length), "x-manual-machines": String(manual), "x-machine-order": order.join(",") });
 }
 
+/* ---------------- 管理 API ---------------- */
+
 async function getNodeConfig(env, machine) {
-  const record = await env.SUBS.get(`sub:${machine}`, { type: "json" });
-  if (!record) return json({ ok: true, machine, nodes: [], manual: false });
-  return json({ ok: true, machine, manual: Boolean(record.manual), updated_at: record.updated_at, nodes: await nodesOf(record) });
+  const manual = await loadManual(env, machine);
+  const rep = await loadReport(env, machine);
+  const nodes = await nodesOf(env, machine);
+  return json({
+    ok: true,
+    machine,
+    manual: Boolean(manual),
+    updated_at: (manual && manual.updated_at) || (rep && rep.updated_at) || "",
+    has_report: Boolean(rep),
+    nodes,
+  });
 }
 
 async function putNodeConfig(request, env, machine) {
-  const body = await request.text();
-  if (body.length > MAX_BODY) return json({ ok: false, error: "config too large" }, 413);
+  const limited = await readLimitedText(request, MAX_BODY);
+  if (limited.tooLarge) return json({ ok: false, error: "config too large" }, 413);
   let data;
-  try { data = JSON.parse(body); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+  try { data = JSON.parse(limited.text); } catch { return json({ ok: false, error: "invalid json" }, 400); }
   if (!data || !Array.isArray(data.nodes)) return json({ ok: false, error: "nodes must be an array" }, 400);
-  if (data.nodes.length > 500) return json({ ok: false, error: "too many nodes" }, 400);
+  if (data.nodes.length > MAX_NODES) return json({ ok: false, error: "too many nodes" }, 400);
+
+  // SW-03：可选的乐观并发检查（If-Match: <updated_at>）。只是可解释的冲突提示，不宣称 KV 上的 CAS。
+  const ifMatch = request.headers.get("if-match") || "";
+  const prevManual = await loadManual(env, machine);
+  if (ifMatch && prevManual && prevManual.updated_at && ifMatch !== prevManual.updated_at) {
+    return json({ ok: false, error: "version conflict", expected: prevManual.updated_at }, 409);
+  }
+
   const inputs = [];
+  const links = [];
   for (const item of data.nodes) {
     if (!item || typeof item.link !== "string") return json({ ok: false, error: "each node needs link" }, 400);
     const link = item.link.trim();
-    if (!link || link.length > 8192 || !parseLink(link)) return json({ ok: false, error: "invalid node link" }, 400);
+    if (!link || link.length > MAX_LINK || !parseLink(link)) return json({ ok: false, error: "invalid node link: " + link.slice(0, 60) }, 400);
+    links.push(link);
     inputs.push({ link, name: typeof item.name === "string" ? item.name.trim().slice(0, 160) : "" });
   }
-  const old = await env.SUBS.get(`sub:${machine}`, { type: "json" });
-  const nodes = await normalizeNodes(inputs.map((x) => x.link), old && Array.isArray(old.nodes) ? old.nodes : [], inputs);
-  const content = encodeBase64(nodes.map((n) => n.link).join("\n"));
-  const record = { machine, content, hash: await sha256Hex(content), bytes: content.length, updated_at: new Date().toISOString(), nodes, manual: true };
-  await env.SUBS.put(`sub:${machine}`, JSON.stringify(record));
-  return json({ ok: true, machine, manual: true, nodes });
+  const nodes = await normalizeNodes(links, [], inputs);
+  const updatedAt = new Date().toISOString();
+  await env.SUBS.put(`manual:${machine}`, JSON.stringify({ machine, nodes, updated_at: updatedAt }));
+  return json({ ok: true, machine, manual: true, nodes, updated_at: updatedAt });
+}
+
+async function createMachine(env, machine) {
+  const rep = await loadReport(env, machine);
+  const manual = await loadManual(env, machine);
+  if (!rep && !manual) {
+    await env.SUBS.put(`manual:${machine}`, JSON.stringify({ machine, nodes: [], updated_at: new Date().toISOString() }));
+  }
+  const order = await getMachineOrder(env);
+  return json({ ok: true, machine, created: !rep && !manual, manual: Boolean(manual) || (!rep && !manual), machine_order: order });
 }
 
 async function resetMachine(env, machine) {
   if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
-  const old = await env.SUBS.get(`sub:${machine}`, { type: "json" });
-  if (!old) return json({ ok: false, error: "subscription not found" }, 404);
-  const nodes = await normalizeNodes(splitLinks(decodeSafe(old.content)), []);
-  const record = { ...old, nodes, manual: false, updated_at: new Date().toISOString() };
-  await env.SUBS.put(`sub:${machine}`, JSON.stringify(record));
-  return json({ ok: true, machine, manual: false, nodes });
+  await env.SUBS.delete(`manual:${machine}`);
+  await env.SUBS.delete(`sub:${machine}`);
+  const rep = await loadReport(env, machine);
+  const nodes = await nodesOf(env, machine);
+  return json({ ok: true, machine, manual: false, has_report: Boolean(rep), nodes });
+}
+
+async function mintMachineToken(env, machine) {
+  const raw = randomHex(32);
+  await env.SUBS.put(`tokenhash:${machine}`, await sha256Hex(raw));
+  await env.SUBS.put(`tokenmeta:${machine}`, JSON.stringify({ machine, created_at: new Date().toISOString() }));
+  return json({ ok: true, machine, token: raw });
+}
+
+async function getMachineToken(env, machine) {
+  const meta = await env.SUBS.get(`tokenmeta:${machine}`, { type: "json" });
+  return json({ ok: true, machine, has_token: Boolean(await env.SUBS.get(`tokenhash:${machine}`)), created_at: (meta && meta.created_at) || "" });
+}
+
+async function revokeMachineToken(env, machine) {
+  await env.SUBS.delete(`tokenhash:${machine}`);
+  await env.SUBS.delete(`tokenmeta:${machine}`);
+  return json({ ok: true, machine, revoked: true });
 }
 
 async function listMachines(env) {
-  const list = await env.SUBS.list({ prefix: "sub:" });
+  const names = await machineSet(env);
   const order = await getMachineOrder(env);
   const rank = new Map(order.map((m, i) => [m, i]));
   const machines = [];
-  for (const key of list.keys) {
-    const record = await env.SUBS.get(key.name, { type: "json" });
-    if (!record) continue;
-    const nodes = await nodesOf(record);
-    machines.push({ machine: record.machine, bytes: record.bytes, updated_at: record.updated_at, hash: record.hash, manual: Boolean(record.manual), nodes: nodes.length });
+  for (const machine of names) {
+    const manual = await loadManual(env, machine);
+    const rep = await loadReport(env, machine);
+    const nodes = await nodesOf(env, machine);
+    machines.push({
+      machine,
+      bytes: (rep && rep.bytes) || 0,
+      updated_at: (manual && manual.updated_at) || (rep && rep.updated_at) || "",
+      hash: (rep && rep.hash) || "",
+      manual: Boolean(manual),
+      has_token: Boolean(await env.SUBS.get(`tokenhash:${machine}`)),
+      nodes: nodes.length,
+    });
   }
   machines.sort((a, b) => {
     const ar = rank.has(a.machine) ? rank.get(a.machine) : defaultMachineRank(a.machine);
@@ -442,6 +708,36 @@ async function listMachines(env) {
     return ar - br || a.machine.localeCompare(b.machine);
   });
   return json({ ok: true, count: machines.length, machines, machine_order: order });
+}
+
+async function deleteMachine(env, machine) {
+  if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
+  for (const key of [`report:${machine}`, `manual:${machine}`, `sub:${machine}`, `tokenhash:${machine}`, `tokenmeta:${machine}`]) {
+    await env.SUBS.delete(key);
+  }
+  const order = await getMachineOrder(env);
+  if (order.includes(machine)) await env.SUBS.put("meta:machine_order", JSON.stringify(order.filter((m) => m !== machine)));
+  return json({ ok: true, deleted: machine });
+}
+
+async function getMachineOrder(env) {
+  const raw = await env.SUBS.get("meta:machine_order", { type: "json" });
+  return Array.isArray(raw) ? raw.filter((x) => typeof x === "string" && MACHINE_RE.test(x)) : [];
+}
+
+async function putMachineOrder(request, env) {
+  const limited = await readLimitedText(request, 65536);
+  if (limited.tooLarge) return json({ ok: false, error: "order too large" }, 413);
+  let data;
+  try { data = JSON.parse(limited.text); } catch { return json({ ok: false, error: "invalid json" }, 400); }
+  if (!data || !Array.isArray(data.machines)) return json({ ok: false, error: "machines must be an array" }, 400);
+  const unique = [];
+  for (const item of data.machines) {
+    if (typeof item !== "string" || !MACHINE_RE.test(item)) return json({ ok: false, error: "invalid machine name" }, 400);
+    if (!unique.includes(item)) unique.push(item);
+  }
+  await env.SUBS.put("meta:machine_order", JSON.stringify(unique));
+  return json({ ok: true, machine_order: unique });
 }
 
 const COUNTRY_GROUPS = {
@@ -506,47 +802,7 @@ function defaultMachineRank(machine) {
   return 100;
 }
 
-async function getMachineOrder(env) {
-  const raw = await env.SUBS.get("meta:machine_order", { type: "json" });
-  return Array.isArray(raw) ? raw.filter((x) => typeof x === "string" && MACHINE_RE.test(x)) : [];
-}
-
-async function putMachineOrder(request, env) {
-  const body = await request.text();
-  if (body.length > 65536) return json({ ok: false, error: "order too large" }, 413);
-  let data;
-  try { data = JSON.parse(body); } catch { return json({ ok: false, error: "invalid json" }, 400); }
-  if (!data || !Array.isArray(data.machines)) return json({ ok: false, error: "machines must be an array" }, 400);
-  const unique = [];
-  for (const item of data.machines) {
-    if (typeof item !== "string" || !MACHINE_RE.test(item)) return json({ ok: false, error: "invalid machine name" }, 400);
-    if (!unique.includes(item)) unique.push(item);
-  }
-  await env.SUBS.put("meta:machine_order", JSON.stringify(unique));
-  return json({ ok: true, machine_order: unique });
-}
-
-async function deleteMachine(env, machine) {
-  if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
-  await env.SUBS.delete(`sub:${machine}`);
-  const order = await getMachineOrder(env);
-  if (order.includes(machine)) await env.SUBS.put("meta:machine_order", JSON.stringify(order.filter((m) => m !== machine)));
-  return json({ ok: true, deleted: machine });
-}
-
-async function nodesOf(record) {
-  let nodes;
-  if (record && Array.isArray(record.nodes) && record.nodes.length) {
-    nodes = record.nodes.slice();
-  } else {
-    nodes = await normalizeNodes(splitLinks(record && record.content ? decodeSafe(record.content) : ""), []);
-  }
-  nodes.sort((a, b) => {
-    if (record && record.manual) return (Number(a.order) || 0) - (Number(b.order) || 0);
-    return protocolRank(a) - protocolRank(b) || (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.name).localeCompare(String(b.name));
-  });
-  return nodes.map((n, i) => ({ ...n, _sort: i }));
-}
+/* ---------------- 节点规范化 ---------------- */
 
 function protocolRank(node) {
   const p = node && node.link ? parseLink(node.link) : null;
@@ -591,7 +847,7 @@ function decodeSafe(text) {
   try { return decodeBase64(String(text || "").replace(/\s+/g, "")); } catch { return ""; }
 }
 
-/* ---------------- link parsing ---------------- */
+/* ---------------- 链接解析 ---------------- */
 
 function safeDecode(value) {
   try { return decodeURIComponent(value || ""); } catch { return value || ""; }
@@ -607,13 +863,42 @@ function parseLink(link) {
     const server = u.hostname;
     if (!server || !Number.isInteger(port) || port < 1 || port > 65535) return null;
     const fragment = safeDecode(u.hash.slice(1));
-    const base = { kind, server, port, name: fragment || `${kind.toUpperCase()}-${server}`, insecure: isInsecure(q) };
+    const base = {
+      kind, server, port,
+      name: fragment || `${kind.toUpperCase()}-${server}`,
+      insecure: hasInsecureFlag(q),
+      pin: (q.get("pinSHA256") || "").replace(/[^0-9a-fA-F]/g, "").toLowerCase(),
+    };
     if (kind === "vless") {
       const security = (q.get("security") || "").toLowerCase();
-      return { ...base, uuid: safeDecode(u.username), tls: security === "tls" || security === "reality", reality: security === "reality", sni: q.get("sni") || q.get("serverName") || "", flow: q.get("flow") || "", network: q.get("type") || "tcp", path: q.get("path") || "", host: q.get("host") || "", pbk: q.get("pbk") || "", sid: q.get("sid") || "", fp: q.get("fp") || "chrome" };
+      return {
+        ...base,
+        uuid: safeDecode(u.username),
+        tls: security === "tls" || security === "reality",
+        reality: security === "reality",
+        sni: q.get("sni") || q.get("serverName") || "",
+        flow: q.get("flow") || "",
+        network: (q.get("type") || "tcp").toLowerCase(),
+        path: q.get("path") || "",
+        host: q.get("host") || "",
+        serviceName: q.get("serviceName") || "",
+        mode: q.get("mode") || "",
+        pbk: q.get("pbk") || "",
+        sid: q.get("sid") || "",
+        fp: q.get("fp") || "chrome",
+      };
     }
     if (kind === "anytls") return { ...base, password: safeDecode(u.username), tls: true, sni: q.get("sni") || "" };
-    if (kind === "hysteria2" || kind === "hy2") return { ...base, kind: "hy2", password: safeDecode(u.username), tls: true, sni: q.get("sni") || "", obfs: q.get("obfs") || "", obfsPassword: q.get("obfs-password") || "" };
+    if (kind === "hysteria2" || kind === "hy2") {
+      return {
+        ...base, kind: "hy2",
+        password: safeDecode(u.username),
+        tls: true,
+        sni: q.get("sni") || "",
+        obfs: q.get("obfs") || "",
+        obfsPassword: q.get("obfs-password") || "",
+      };
+    }
     if (kind === "tuic") return { ...base, uuid: safeDecode(u.username), password: safeDecode(u.password), tls: true, sni: q.get("sni") || "", congestion: q.get("congestion_control") || "bbr", relay: q.get("udp_relay_mode") || "native" };
     if (kind === "trojan") return { ...base, password: safeDecode(u.username), tls: true, sni: q.get("sni") || "" };
     if (kind === "socks5" || kind === "socks") return { ...base, kind: "socks5", username: safeDecode(u.username), password: safeDecode(u.password), tls: false, sni: "" };
@@ -635,16 +920,24 @@ function parseVmess(link) {
     const j = JSON.parse(raw);
     const port = Number(j.port || 443);
     if (!j.add || !j.id || !port) return null;
-    return { kind: "vmess", server: j.add, port, name: j.ps || `VMess-${j.add}`, uuid: j.id, alterId: Number(j.aid || 0), cipher: j.scy || "auto", tls: String(j.tls || "") === "tls", sni: j.sni || j.host || "", network: j.net || "tcp", path: j.path || "", host: j.host || "", insecure: false };
+    return {
+      kind: "vmess", server: j.add, port,
+      name: j.ps || `VMess-${j.add}`,
+      uuid: j.id, alterId: Number(j.aid || 0), cipher: j.scy || "auto",
+      tls: String(j.tls || "") === "tls", sni: j.sni || j.host || "",
+      network: (j.net || "tcp").toLowerCase(), path: j.path || "", host: j.host || "",
+      serviceName: j.path || "", mode: "",
+      insecure: false, pin: "",
+    };
   } catch { return null; }
 }
 
-function isInsecure(q) {
+function hasInsecureFlag(q) {
   const v = (q.get("allow_insecure") || q.get("allowInsecure") || q.get("insecure") || "").toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || q.has("pinSHA256");
+  return v === "1" || v === "true" || v === "yes";
 }
 
-/* ---------------- subscription formats ---------------- */
+/* ---------------- 订阅格式 ---------------- */
 
 function formatOf(request) {
   const u = new URL(request.url);
@@ -663,24 +956,47 @@ function formatOf(request) {
 
 function subResponse(nodes, request, extraHeaders) {
   const format = formatOf(request);
-  let body;
-  let type = "text/plain; charset=utf-8";
-  if (format === "clash") { body = toClash(nodes); type = "text/yaml; charset=utf-8"; }
-  else if (format === "singbox") { body = toSingbox(nodes); type = "application/json; charset=utf-8"; }
-  else body = encodeBase64(nodes.map((n) => n.link).join("\n"));
-  return new Response(body, {
-    headers: { ...corsHeaders(), "content-type": type, "cache-control": "no-store, max-age=0", "profile-update-interval": "6", ...(extraHeaders || {}) },
-  });
+  const headers = { ...corsHeaders(), "cache-control": "no-store, max-age=0", "profile-update-interval": "6", ...(extraHeaders || {}) };
+  if (format === "clash") {
+    const built = toClash(nodes);
+    if (built.unsupported.length) return unsupportedResponse(format, built.unsupported);
+    return new Response(built.text, { headers: { ...headers, "content-type": "text/yaml; charset=utf-8" } });
+  }
+  if (format === "singbox") {
+    const built = toSingbox(nodes);
+    if (built.unsupported.length) return unsupportedResponse(format, built.unsupported);
+    return new Response(built.text, { headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+  }
+  return new Response(encodeBase64(nodes.map((n) => n.link).join("\n")), { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+}
+
+function unsupportedResponse(format, nodes) {
+  // SW-04/SW-07：目标格式表达不了的能力明确拒绝，不退化成跳过验证或 TCP。
+  return json(
+    { ok: false, error: "format cannot represent node", format, nodes: nodes.slice(0, 20), hint: "使用 ?format=base64 保留原始链接" },
+    501,
+  );
 }
 
 function yamlString(value) { return JSON.stringify(String(value == null ? "" : value)); }
 
 function toClash(nodes) {
   const lines = ["proxies:"];
+  const unsupported = [];
   for (const node of nodes) {
     const p = node.proxy || parseLink(node.link);
     if (!p) continue;
-    lines.push(`  - name: ${yamlString(node.name || p.name)}`);
+    const name = node.name || p.name;
+    if (p.network === "xhttp" || p.network === "xhttp-reality" || (p.kind === "vless" && p.mode && p.network === "xhttp")) {
+      unsupported.push(name);
+      continue;
+    }
+    if (p.reality && p.pin) {
+      // reality 与证书指纹互斥；同时出现说明链接本身异常，明确拒绝。
+      unsupported.push(name);
+      continue;
+    }
+    lines.push(`  - name: ${yamlString(name)}`);
     lines.push(`    type: ${p.kind === "hy2" ? "hysteria2" : p.kind}`);
     lines.push(`    server: ${yamlString(p.server)}`);
     lines.push(`    port: ${p.port}`);
@@ -695,6 +1011,10 @@ function toClash(nodes) {
         lines.push("    ws-opts:");
         lines.push(`      path: ${yamlString(p.path || "/")}`);
         if (p.host) { lines.push("      headers:"); lines.push(`        Host: ${yamlString(p.host)}`); }
+      } else if (p.network === "grpc") {
+        lines.push("    network: grpc");
+        lines.push("    grpc-opts:");
+        lines.push(`      grpc-service-name: ${yamlString(p.serviceName || p.path || "")}`);
       }
       if (p.reality && p.pbk) {
         lines.push("    reality-opts:");
@@ -702,15 +1022,19 @@ function toClash(nodes) {
         if (p.sid) lines.push(`      short-id: ${yamlString(p.sid)}`);
         lines.push(`    client-fingerprint: ${yamlString(p.fp || "chrome")}`);
       }
+      if (p.pin) lines.push(`    fingerprint: ${yamlString(p.pin)}`);
       if (p.insecure) lines.push("    skip-cert-verify: true");
     } else if (p.kind === "anytls") {
       lines.push(`    password: ${yamlString(p.password)}`);
       if (p.sni) lines.push(`    sni: ${yamlString(p.sni)}`);
+      if (p.pin) lines.push(`    fingerprint: ${yamlString(p.pin)}`);
       if (p.insecure) lines.push("    skip-cert-verify: true");
     } else if (p.kind === "hy2") {
       lines.push(`    password: ${yamlString(p.password)}`);
       if (p.sni) lines.push(`    sni: ${yamlString(p.sni)}`);
       lines.push("    alpn:"); lines.push("      - h3");
+      if (p.obfs) { lines.push(`    obfs: ${yamlString(p.obfs)}`); if (p.obfsPassword) lines.push(`    obfs-password: ${yamlString(p.obfsPassword)}`); }
+      if (p.pin) lines.push(`    fingerprint: ${yamlString(p.pin)}`);
       if (p.insecure) lines.push("    skip-cert-verify: true");
     } else if (p.kind === "tuic") {
       lines.push(`    uuid: ${yamlString(p.uuid)}`);
@@ -719,10 +1043,12 @@ function toClash(nodes) {
       lines.push("    alpn:"); lines.push("      - h3");
       lines.push("    congestion-controller: bbr");
       lines.push("    udp-relay-mode: native");
+      if (p.pin) lines.push(`    fingerprint: ${yamlString(p.pin)}`);
       if (p.insecure) lines.push("    skip-cert-verify: true");
     } else if (p.kind === "trojan") {
       lines.push(`    password: ${yamlString(p.password)}`);
       if (p.sni) lines.push(`    sni: ${yamlString(p.sni)}`);
+      if (p.pin) lines.push(`    fingerprint: ${yamlString(p.pin)}`);
       if (p.insecure) lines.push("    skip-cert-verify: true");
     } else if (p.kind === "ss") {
       lines.push(`    cipher: ${yamlString(p.method)}`);
@@ -741,18 +1067,28 @@ function toClash(nodes) {
         lines.push("    ws-opts:");
         lines.push(`      path: ${yamlString(p.path || "/")}`);
         if (p.host) { lines.push("      headers:"); lines.push(`        Host: ${yamlString(p.host)}`); }
+      } else if (p.network === "grpc") {
+        lines.push("    network: grpc");
+        lines.push("    grpc-opts:");
+        lines.push(`      grpc-service-name: ${yamlString(p.serviceName || p.path || "")}`);
       }
     }
   }
-  return lines.join("\n") + "\n";
+  return { text: lines.join("\n") + "\n", unsupported };
 }
 
 function toSingbox(nodes) {
   const outbounds = [];
+  const unsupported = [];
   for (const node of nodes) {
     const p = node.proxy || parseLink(node.link);
     if (!p) continue;
     const tag = node.name || p.name;
+    // SW-04：sing-box 没有"证书指纹固定"字段（certificate_public_key_sha256 是公钥 pin，
+    // 和证书指纹语义不同，不能混用），因此明确拒绝而不是退化成 insecure。
+    if (p.pin) { unsupported.push(tag); continue; }
+    // SW-07：sing-box 该版本不保证支持 xhttp 传输，明确拒绝，不降级成 tcp。
+    if (p.kind === "vless" && (p.network === "xhttp" || p.network === "xhttp-reality")) { unsupported.push(tag); continue; }
     const tls = { enabled: true };
     if (p.sni) tls.server_name = p.sni;
     if (p.insecure) tls.insecure = true;
@@ -767,12 +1103,16 @@ function toSingbox(nodes) {
       if (p.network === "ws") {
         o.transport = { type: "ws", path: p.path || "/" };
         if (p.host) o.transport.headers = { Host: p.host };
+      } else if (p.network === "grpc") {
+        o.transport = { type: "grpc", service_name: p.serviceName || p.path || "" };
       }
       outbounds.push(o);
     } else if (p.kind === "anytls") {
       outbounds.push({ type: "anytls", tag, server: p.server, server_port: p.port, password: p.password, tls });
     } else if (p.kind === "hy2") {
-      outbounds.push({ type: "hysteria2", tag, server: p.server, server_port: p.port, password: p.password, tls });
+      const o = { type: "hysteria2", tag, server: p.server, server_port: p.port, password: p.password, tls };
+      if (p.obfs) o.obfs = { type: p.obfs, password: p.obfsPassword || "" };
+      outbounds.push(o);
     } else if (p.kind === "tuic") {
       outbounds.push({ type: "tuic", tag, server: p.server, server_port: p.port, uuid: p.uuid, password: p.password, congestion_control: p.congestion || "bbr", udp_relay_mode: p.relay || "native", tls });
     } else if (p.kind === "trojan") {
@@ -790,26 +1130,51 @@ function toSingbox(nodes) {
       if (p.network === "ws") {
         o.transport = { type: "ws", path: p.path || "/" };
         if (p.host) o.transport.headers = { Host: p.host };
+      } else if (p.network === "grpc") {
+        o.transport = { type: "grpc", service_name: p.serviceName || p.path || "" };
       }
       outbounds.push(o);
     }
   }
-  return JSON.stringify({ outbounds }, null, 2);
+  return { text: JSON.stringify({ outbounds }, null, 2), unsupported };
 }
 
-/* ---------------- auth / encoding ---------------- */
+/* ---------------- 请求/编码/响应工具 ---------------- */
 
-function checkBearer(request, expected) {
-  if (!expected) return false;
-  const header = request.headers.get("authorization") || "";
-  const m = header.match(/^Bearer\s+(.+)$/i);
-  return m ? checkToken(m[1].trim(), expected) : false;
+async function readLimitedText(request, limit) {
+  const declared = Number(request.headers.get("content-length") || "");
+  if (Number.isFinite(declared) && declared > limit) return { text: "", tooLarge: true };
+  if (!request.body) return { text: "", tooLarge: false };
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      try { await reader.cancel(); } catch { /* 已超限，取消读取 */ }
+      return { text: "", tooLarge: true };
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(size);
+  let offset = 0;
+  for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
+  return { text: new TextDecoder().decode(merged), tooLarge: false };
 }
+
 function checkToken(actual, expected) {
   if (!expected || typeof actual !== "string" || actual.length !== expected.length) return false;
   let diff = 0;
   for (let i = 0; i < actual.length; i++) diff |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
   return diff === 0;
+}
+function anyTokenMatch(actual, list) { return Array.isArray(list) && list.some((t) => checkToken(actual, t)); }
+function randomHex(bytes) {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 async function sha256Hex(text) {
   const data = new TextEncoder().encode(text);
@@ -827,6 +1192,7 @@ function encodeBase64(text) {
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary);
 }
+function baseUrl(request) { return new URL(request.url).origin; }
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders(), "content-type": "application/json; charset=utf-8" } });
 }
@@ -839,5 +1205,5 @@ function methodNotAllowed(allow) {
   return new Response(JSON.stringify({ ok: false, error: "method not allowed" }), { status: 405, headers: { ...corsHeaders(), "content-type": "application/json; charset=utf-8", allow } });
 }
 function corsHeaders() {
-  return { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type", "x-content-type-options": "nosniff" };
+  return { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS", "access-control-allow-headers": "Authorization, Content-Type, If-Match", "x-content-type-options": "nosniff" };
 }

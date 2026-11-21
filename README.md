@@ -7,11 +7,12 @@
 ## 特性
 
 - 固定订阅 URL，重启/重新部署 Worker 不变；
-- 一个 `TOKEN` 同时用于上报和读取；
+- **凭据分权**：`ADMIN_TOKEN` 管管理、`READ_TOKEN` 只管读订阅、每台机器还能有独立上报密钥，三者互不越权；
 - 每台机器一个 `machine` slug，支持单机和合并订阅；
+- **WebUI 可以直接新增机器**，不依赖机器先上报；
 - Cloudflare KV 存储，按内容 SHA-256 去重，相同内容不重复写；
 - **WebUI 可以编辑节点链接、节点名称、机器顺序和节点顺序**；
-- **自动适配 base64 / Clash / sing-box 订阅格式**；
+- **自动适配 base64 / Clash / sing-box 订阅格式**；格式表达不了的节点（证书指纹 pin、xhttp 传输）会明确返回 501，不静默降级；
 - 手动编辑后，机器自动上报不会覆盖手动配置；
 - 支持 `workers.dev` 默认域名和自定义域名；
 - 自动从请求 `Origin` 推断对外域名，无需配置 `PUBLIC_BASE_URL`；
@@ -54,13 +55,25 @@ binding = "SUBS"
 id = "你的 KV namespace id"
 ```
 
-### 2. 设置 TOKEN
+### 2. 设置密钥
 
 ```bash
-pnpm exec wrangler secret put TOKEN
+pnpm exec wrangler secret put ADMIN_TOKEN   # 管理：WebUI + 全部管理接口
+pnpm exec wrangler secret put READ_TOKEN    # 只读：订阅 URL 用
 ```
 
-`TOKEN` 是唯一认证凭证，上报和读取共用。建议使用 UUID v4 或 32 字节随机 URL-safe 字符串。
+三者关系：
+
+| 密钥 | 能做什么 | 是否出现在订阅 URL |
+|---|---|---|
+| `ADMIN_TOKEN` | WebUI、增删机器、改节点、生成按机密钥 | 否 |
+| `READ_TOKEN` | 只读订阅（`/sub/...`） | 是（订阅 URL 的 token） |
+| 每机上报密钥 | 只能给授权的那台机器上报 | 否（放在上报请求头） |
+| `REPORT_TOKEN` | 可选：给所有机器上报 | 否 |
+| `TOKEN`（旧） | 旧版共享密钥；设 `ALLOW_LEGACY_TOKEN=0` 后彻底禁用 | 是（兼容期） |
+
+建议 `ADMIN_TOKEN`、`READ_TOKEN` 都用 UUID v4 或 32 字节随机 URL-safe 字符串，并且彼此不同。
+按机上报密钥在 WebUI 的“密钥”按钮生成，Worker 只保存它的 SHA-256。
 
 ### 3. 部署
 
@@ -93,8 +106,9 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
 3. 新建 KV namespace，在 Worker 的 Settings → Bindings 绑定：
    - Variable name：`SUBS`
    - KV namespace：刚创建的那个；
-4. Settings → Variables and Secrets 添加一个 Secret：
-   - `TOKEN`：你的 token；
+4. Settings → Variables and Secrets 添加 Secrets：
+   - `ADMIN_TOKEN`：管理密钥；
+   - `READ_TOKEN`：订阅读取密钥；
 5. Deploy；
 6. 需要自定义域名时，在 Domains & Routes 绑定。
 
@@ -103,16 +117,22 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
 部署后访问：
 
 ```text
-https://<worker>/ui/<TOKEN>
+https://<worker>/ui
 ```
+
+首次打开输入 `ADMIN_TOKEN`，只存在浏览器 `sessionStorage`，不再把凭据放进 URL。
+旧路径 `/ui/<ADMIN_TOKEN>` 仍可用（要求是管理密钥）。
 
 界面支持：
 
+- **新增机器**（机器名 + 每行一个链接，可直接粘贴，也可以先建空机器）；
+- 为任意机器生成/轮换按机上报密钥（只显示一次）；
 - 选择机器；
 - **机器列表上移/下移，保存合并订阅中的机器顺序**；
 - 修改节点链接和显示名称；
 - 上移、下移调整节点顺序；
 - 添加、删除节点；
+- 清空某台机器的节点（空数组也是有效的手动覆盖，不会被自动上报“复活”）；
 - 保存后订阅立即按新顺序生成；
 - “恢复自动上报”会清除手动配置，重新采用最近一次上报内容。
 
@@ -155,7 +175,11 @@ vmess://
 | 名称 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `SUBS` | KV binding | 是 | 存储订阅内容 |
-| `TOKEN` | Secret | 是 | 上报和读取共用的认证 token |
+| `ADMIN_TOKEN` | Secret | 是 | 管理密钥（WebUI / 管理接口） |
+| `READ_TOKEN` | Secret | 是 | 订阅读取密钥 |
+| `REPORT_TOKEN` | Secret | 否 | 全局上报密钥（迁移期用） |
+| `ALLOW_LEGACY_TOKEN` | Var | 否 | 默认 `1`；设为 `0` 后旧 `TOKEN` 完全失效 |
+| `TOKEN` | Secret | 否 | 旧版共享密钥，兼容用，建议迁移后删除 |
 
 不需要 `PUBLIC_BASE_URL`；Worker 根路径返回的 `subscription_base` 来自当前请求的 `Origin`。
 
@@ -214,7 +238,7 @@ URL 路径：  /sub/abc%2Bdef%3Dghi
 
 ```http
 POST /api/v1/report/:machine
-Authorization: Bearer <TOKEN>
+Authorization: Bearer <该机器上报密钥 | ADMIN_TOKEN | REPORT_TOKEN>
 Content-Type: text/plain
 Body: base64 编码的订阅内容
 ```
@@ -243,7 +267,13 @@ curl -X POST \
 | `GET` | `/sub/:machine/:token` | 单机订阅 |
 | `GET` | `/sub/:token` | 全部机器合并订阅（推荐） |
 | `GET` | `/sub/all/:token` | 合并订阅的兼容旧路径 |
-| `GET` | `/ui/:token` | WebUI 节点管理 |
+| `GET` | `/ui` | WebUI（登录时输入 `ADMIN_TOKEN`） |
+| `GET` | `/ui/:admin_token` | 兼容旧路径，要求管理密钥 |
+| `GET` | `/api/v1/settings` | 读取 `read_token` 供 UI 拼订阅 URL，Bearer `ADMIN_TOKEN` |
+| `POST` | `/api/v1/machines/:machine` | 新建机器（写空的手动覆盖），Bearer `ADMIN_TOKEN` |
+| `POST` | `/api/v1/machines/:machine/token` | 生成/轮换该机上报密钥，只返回一次明文 |
+| `GET` | `/api/v1/machines/:machine/token` | 查询是否已有上报密钥 |
+| `DELETE` | `/api/v1/machines/:machine/token` | 吊销上报密钥 |
 | `GET` | `/api/v1/nodes/:machine` | 读取节点配置，Bearer `TOKEN` |
 | `PUT` | `/api/v1/nodes/:machine` | 保存节点链接/名称/顺序，Bearer `TOKEN` |
 | `GET` | `/api/v1/machines/order` | 读取机器顺序（也可从 machines 响应获取） |
@@ -335,17 +365,18 @@ sub_machine='machine-a'
 
 ## 安全
 
-- `TOKEN` 是 bearer secret，建议使用 Secret 类型，不要提交到仓库；
-- 订阅内容包含节点 UUID/密码，读取 URL 的 token 必须不可猜；
-- 不要使用公开 GitHub Gist 存放订阅；
-- token 泄露后：在 Worker 中轮换 `TOKEN`，所有旧订阅 URL 会立即失效，再通知客户端更新；
-- Worker 日志/分析中可能记录请求路径，生产环境应限制日志访问权限；
-- 如需更细的权限控制，可扩展为每台机器单独 token。
+- `ADMIN_TOKEN`、`READ_TOKEN`、按机上报密钥都是 bearer secret，用 Secret 类型，不要提交到仓库；
+- 管理接口只接受 `ADMIN_TOKEN`；只读 token 读不了机器列表，也改不了节点；
+- 按机上报密钥的明文只在生成时返回一次，KV 里只有 SHA-256；泄露后点“密钥”重新生成即可（旧密钥立即失效）；
+- 订阅内容包含节点 UUID/密码，`READ_TOKEN` 必须不可猜；`READ_TOKEN` 泄露时轮换它，旧订阅 URL 立即失效；
+- 读取与上报分离后，把 `READ_TOKEN` 交给客户端不会连带给出写入权限；
+- 完成迁移后设 `ALLOW_LEGACY_TOKEN=0`，旧 `TOKEN` 的读写权限一起关闭；
+- Worker 请求路径可能进日志，生产环境限制日志访问权限。
 
 ## 已知限制
 
 - Cloudflare KV 的 `list()` 是最终一致的：刚上报后立刻访问 `/sub/:token` 或 `/sub/all/:token` 可能短暂为空，通常十几秒后出现；单机 `/sub/:machine/:token` 通常立即可用；
-- WebUI 采用 `TOKEN` 路径认证，请勿把 `/ui/<TOKEN>` 发给他人；
+- WebUI 用 `ADMIN_TOKEN` 登录，不要把管理密钥发给他人（旧 `/ui/<token>` 路径同样要求管理密钥）；
 - 手动编辑后不会自动合并新上报节点，需要点“恢复自动上报”才会恢复；
 - `workers.dev` 域名在部分地区可能不可达，建议绑定自定义域名；
 - 免费 KV 有写入次数限制，本项目已做内容 hash 去重。
@@ -355,7 +386,7 @@ sub_machine='machine-a'
 ```bash
 pnpm install
 pnpm test                 # Node 内置测试
-pnpm dev --local --var TOKEN:test-token
+pnpm dev --local --var ADMIN_TOKEN:admin-token --var READ_TOKEN:read-token
 pnpm run build:single     # 生成 worker.single.js
 pnpm exec wrangler deploy --dry-run --outdir dist
 ```
@@ -366,12 +397,12 @@ pnpm exec wrangler deploy --dry-run --outdir dist
 BODY=$(printf 'vless://test\nanytls://test2' | base64 -w0)
 
 curl -X POST \
-  -H 'Authorization: Bearer test-token' \
+  -H 'Authorization: Bearer admin-token' \
   --data-binary "$BODY" \
   http://127.0.0.1:8787/api/v1/report/machine-a
 
-curl http://127.0.0.1:8787/sub/machine-a/test-token
-curl http://127.0.0.1:8787/sub/test-token
+curl http://127.0.0.1:8787/sub/machine-a/read-token
+curl http://127.0.0.1:8787/sub/read-token
 ```
 
 ## 目录

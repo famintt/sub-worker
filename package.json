@@ -1,9 +1,9 @@
 {
   "name": "sub-worker",
-  "version": "1.1.4",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Fixed subscription endpoint for singbox-manager, backed by Cloudflare Workers KV",
+  "description": "Fixed subscription endpoint with per-machine report tokens, admin/read separation, clash & sing-box output",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

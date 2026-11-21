@@ -3,9 +3,12 @@ import test from "node:test";
 
 import worker from "../src/index.js";
 
+const enc = new TextEncoder();
+
 class MockKV {
   constructor() {
     this.map = new Map();
+    this.pageSize = 1000;
   }
   async get(key, opts = {}) {
     if (!this.map.has(key)) return null;
@@ -13,295 +16,327 @@ class MockKV {
     return opts.type === "json" ? JSON.parse(value) : value;
   }
   async put(key, value) {
-    this.map.set(key, value);
+    this.map.set(key, String(value));
   }
   async delete(key) {
     this.map.delete(key);
   }
-  async list({ prefix = "" } = {}) {
+  async list({ prefix = "", cursor } = {}) {
+    const names = [...this.map.keys()].filter((k) => k.startsWith(prefix)).sort();
+    const start = cursor ? Number(cursor) : 0;
+    const slice = names.slice(start, start + this.pageSize);
+    const next = start + slice.length;
     return {
-      keys: [...this.map.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })),
+      keys: slice.map((name) => ({ name })),
+      list_complete: next >= names.length,
+      cursor: next >= names.length ? undefined : String(next),
     };
   }
 }
 
-const TOKEN = "test-token";
+const ADMIN = "admin-token";
+const READ = "read-token";
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 const unb64 = (s) => Buffer.from(s, "base64").toString("utf8");
 
-function makeEnv() {
-  return { SUBS: new MockKV(), TOKEN };
+function makeEnv(extra = {}) {
+  return { SUBS: new MockKV(), ADMIN_TOKEN: ADMIN, READ_TOKEN: READ, ...extra };
 }
 
 function call(env, method, path, body, headers = {}) {
-  return worker.fetch(
-    new Request(`https://sub.example.workers.dev${path}`, {
-      method,
-      body,
-      headers,
-    }),
-    env,
-  );
+  const init = { method, headers };
+  if (body !== undefined && body !== null) {
+    if (body instanceof Uint8Array) {
+      init.body = body;
+    } else {
+      init.body = body;
+    }
+  }
+  return worker.fetch(new Request(`https://sub.example.workers.dev${path}`, init), env);
 }
 
-test("health", async () => {
+const admin = { authorization: `Bearer ${ADMIN}` };
+const reader = { authorization: `Bearer ${READ}` };
+
+const LINKS = [
+  "vless://11111111-2222-3333-4444-555555555555@1.1.1.1:443?encryption=none&security=tls&sni=a.example&type=ws&path=%2Fws&host=a.example#A-WS-CDN",
+  "vless://11111111-2222-3333-4444-555555555555@2.2.2.2:8443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.bing.com&fp=chrome&pbk=PUBKEY&sid=abcd&type=tcp#B-Reality",
+  "anytls://pw@3.3.3.3:443?sni=c.example#C-AnyTLS",
+  "hysteria2://pw@4.4.4.4:8443?sni=d.example&insecure=1&obfs=salamander&obfs-password=xyz#D-HY2",
+  "tuic://uuid:pw@5.5.5.5:443?congestion_control=bbr&alpn=h3&sni=e.example&allow_insecure=1#E-TUIC",
+];
+
+async function reportLinks(env, machine, links, headers = admin) {
+  const body = b64(links.join("\n"));
+  const res = await call(env, "POST", `/api/v1/report/${machine}`, body, headers);
+  return res;
+}
+
+test("health exposes role separation", async () => {
   const res = await call(makeEnv(), "GET", "/health");
   assert.equal(res.status, 200);
   const data = await res.json();
   assert.equal(data.ok, true);
+  assert.equal(data.version, "2.0.0");
+  assert.equal(data.roles.admin, true);
+  assert.equal(data.roles.read, true);
+  assert.equal(data.roles.per_machine_report, true);
 });
 
-test("report requires auth and validates base64", async () => {
+test("admin endpoints reject read token and anonymous", async () => {
   const env = makeEnv();
-  let res = await call(env, "POST", "/api/v1/report/sgw", b64("vless://x"));
-  assert.equal(res.status, 401);
-
-  res = await call(env, "POST", "/api/v1/report/sgw", "not base64!", {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  assert.equal(res.status, 400);
+  assert.equal((await call(env, "GET", "/api/v1/machines")).status, 401);
+  assert.equal((await call(env, "GET", "/api/v1/machines", null, reader)).status, 401);
+  assert.equal((await call(env, "GET", "/api/v1/machines", null, admin)).status, 200);
 });
 
-test("report, dedupe, read and list", async () => {
+test("read token is required for subscription; admin token is not a read token", async () => {
   const env = makeEnv();
-  const body = b64("vless://one\nanytls://two");
-  let res = await call(env, "POST", "/api/v1/report/sgw", body, {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  assert.equal(res.status, 200);
-  let data = await res.json();
-  assert.equal(data.changed, true);
-
-  res = await call(env, "POST", "/api/v1/report/sgw", body, {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  data = await res.json();
-  assert.equal(data.changed, false);
-
-  res = await call(env, "GET", `/sub/sgw/${TOKEN}`);
-  assert.equal(res.status, 200);
-  assert.equal(unb64(await res.text()), "anytls://two\nvless://one");
-
-  res = await call(env, "GET", `/sub/sgw/wrong`);
-  assert.equal(res.status, 401);
-
-  res = await call(env, "GET", `/api/v1/machines`, null, {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  data = await res.json();
-  assert.equal(data.count, 1);
-  assert.equal(data.machines[0].machine, "sgw");
+  await reportLinks(env, "sgw", LINKS);
+  assert.equal((await call(env, "GET", "/sub/sgw/wrong")).status, 401);
+  assert.equal((await call(env, "GET", "/sub/sgw/" + ADMIN)).status, 401);
+  const ok = await call(env, "GET", `/sub/sgw/${READ}`);
+  assert.equal(ok.status, 200);
+  const lines = unb64(await ok.text()).split("\n").filter(Boolean);
+  assert.equal(lines.length, LINKS.length);
+  assert.ok(lines[0].includes("security=reality"), "reality 排在最前");
 });
 
-test("missing variables return config error", async () => {
-  const env = { SUBS: new MockKV() };
-  let res = await call(env, "POST", "/api/v1/report/cfg", b64("vless://x"), {
-    authorization: "Bearer anything",
-  });
-  assert.equal(res.status, 500);
-  res = await call(env, "GET", "/sub/cfg/anything");
-  assert.equal(res.status, 500);
+test("legacy TOKEN works by default but is disabled with ALLOW_LEGACY_TOKEN=0", async () => {
+  const legacyEnv = makeEnv({ TOKEN: "old-token" });
+  assert.equal((await reportLinks(legacyEnv, "sgw", LINKS, { authorization: "Bearer old-token" })).status, 200);
+  assert.equal((await call(legacyEnv, "GET", "/sub/sgw/old-token")).status, 200);
+
+  const strict = makeEnv({ TOKEN: "old-token", ALLOW_LEGACY_TOKEN: "0" });
+  assert.equal((await reportLinks(strict, "sgw", LINKS, { authorization: "Bearer old-token" })).status, 401);
+  assert.equal((await call(strict, "GET", "/sub/sgw/old-token")).status, 401);
 });
 
-test("special characters in TOKEN work when URL-encoded", async () => {
-  const env = { SUBS: new MockKV(), TOKEN: "a+b=c" };
-  const body = b64("vless://special");
-  let res = await call(env, "POST", "/api/v1/report/special", body, {
-    authorization: "Bearer a+b=c",
-  });
-  assert.equal(res.status, 200);
-  res = await call(env, "GET", "/sub/special/a%2Bb%3Dc");
-  assert.equal(res.status, 200);
-  assert.equal(unb64(await res.text()), "vless://special");
-});
-
-test("all merges machines and delete works", async () => {
+test("per-machine token can report only its own machine", async () => {
   const env = makeEnv();
-  for (const [machine, text] of [
-    ["sgw", "vless://a"],
-    ["sjc", "vless://b"],
-  ]) {
-    const res = await call(env, "POST", `/api/v1/report/${machine}`, b64(text), {
-      authorization: `Bearer ${TOKEN}`,
-    });
-    assert.equal(res.status, 200);
+  const minted = await call(env, "POST", "/api/v1/machines/hk/token", null, admin);
+  assert.equal(minted.status, 200);
+  const { token } = await minted.json();
+  assert.match(token, /^[0-9a-f]{64}$/);
+
+  const own = await reportLinks(env, "hk", LINKS, { authorization: `Bearer ${token}` });
+  assert.equal(own.status, 200);
+
+  const other = await reportLinks(env, "sgw", LINKS, { authorization: `Bearer ${token}` });
+  assert.equal(other.status, 401);
+
+  assert.equal((await call(env, "GET", "/api/v1/machines/hk/token", null, admin)).status, 200);
+  assert.equal((await call(env, "DELETE", "/api/v1/machines/hk/token", null, admin)).status, 200);
+  assert.equal((await reportLinks(env, "hk", LINKS, { authorization: `Bearer ${token}` })).status, 401);
+});
+
+test("report dedupes by content hash", async () => {
+  const env = makeEnv();
+  const first = await (await reportLinks(env, "sgw", LINKS)).json();
+  assert.equal(first.changed, true);
+  const second = await (await reportLinks(env, "sgw", LINKS)).json();
+  assert.equal(second.changed, false);
+});
+
+test("manual override survives later reports; reset restores the snapshot", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", LINKS);
+
+  const put = await call(
+    env,
+    "PUT",
+    "/api/v1/nodes/sgw",
+    JSON.stringify({ nodes: [{ link: LINKS[3], name: "手工 HY2" }] }),
+    { ...admin, "content-type": "application/json" },
+  );
+  assert.equal(put.status, 200);
+
+  await reportLinks(env, "sgw", LINKS.slice(0, 2));
+  const cfg = await (await call(env, "GET", "/api/v1/nodes/sgw", null, admin)).json();
+  assert.equal(cfg.manual, true);
+  assert.equal(cfg.nodes.length, 1);
+  assert.equal(cfg.nodes[0].name, "手工 HY2");
+
+  const reset = await call(env, "POST", "/api/v1/machines/sgw/reset", null, admin);
+  assert.equal(reset.status, 200);
+  const after = await (await call(env, "GET", "/api/v1/nodes/sgw", null, admin)).json();
+  assert.equal(after.manual, false);
+  assert.equal(after.nodes.length, 2);
+});
+
+test("empty manual array is a valid override and does not fall back to the snapshot", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", LINKS);
+  const put = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [] }), { ...admin, "content-type": "application/json" });
+  assert.equal(put.status, 200);
+  const cfg = await (await call(env, "GET", "/api/v1/nodes/sgw", null, admin)).json();
+  assert.equal(cfg.manual, true);
+  assert.equal(cfg.nodes.length, 0);
+  const sub = await call(env, "GET", `/sub/sgw/${READ}`);
+  assert.equal(unb64(await sub.text()), "");
+});
+
+test("If-Match conflict is reported instead of silently overwriting", async () => {
+  const env = makeEnv();
+  const put1 = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [{ link: LINKS[3] }] }), { ...admin, "content-type": "application/json" });
+  const { updated_at } = await put1.json();
+  const conflict = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [{ link: LINKS[4] }] }), { ...admin, "content-type": "application/json", "if-match": "1999-01-01T00:00:00.000Z" });
+  assert.equal(conflict.status, 409);
+  const ok = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [{ link: LINKS[4] }] }), { ...admin, "content-type": "application/json", "if-match": updated_at });
+  assert.equal(ok.status, 200);
+});
+
+test("create machine writes an empty manual override", async () => {
+  const env = makeEnv();
+  const created = await call(env, "POST", "/api/v1/machines/new-york", JSON.stringify({}), { ...admin, "content-type": "application/json" });
+  assert.equal(created.status, 200);
+  const list = await (await call(env, "GET", "/api/v1/machines", null, admin)).json();
+  assert.equal(list.count, 1);
+  assert.equal(list.machines[0].machine, "new-york");
+  assert.equal(list.machines[0].manual, true);
+  assert.equal(list.machines[0].nodes, 0);
+});
+
+test("machine order controls /sub/all ordering", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "us-one", [LINKS[1]]);
+  await reportLinks(env, "hk-one", [LINKS[1]]);
+  const order = await call(env, "PUT", "/api/v1/machines/order", JSON.stringify({ machines: ["us-one", "hk-one"] }), { ...admin, "content-type": "application/json" });
+  assert.equal(order.status, 200);
+  const sub = await call(env, "GET", `/sub/all/${READ}`);
+  const lines = unb64(await sub.text()).split("\n").filter(Boolean);
+  assert.equal(lines.length, 2);
+  assert.equal(sub.headers.get("x-machine-order"), "us-one,hk-one");
+});
+
+test("pinSHA256 is preserved for Clash and refused for sing-box", async () => {
+  const env = makeEnv();
+  const pinned = "anytls://pw@6.6.6.6:443?sni=f.example&pinSHA256=AB:CD:EF:01&insecure=1#Pinned";
+  await reportLinks(env, "sgw", [pinned]);
+  const clash = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
+  assert.equal(clash.status, 200);
+  const yaml = await clash.text();
+  assert.match(yaml, /fingerprint: "abcdef01"/);
+  assert.match(yaml, /skip-cert-verify: true/);
+  const sb = await call(env, "GET", `/sub/sgw/${READ}?format=singbox`);
+  assert.equal(sb.status, 501);
+  const body = await sb.json();
+  assert.equal(body.error, "format cannot represent node");
+  assert.equal((await call(env, "GET", `/sub/sgw/${READ}`)).status, 200);
+});
+
+test("insecure flag alone does not imply fingerprint", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", ["anytls://pw@6.6.6.6:443?sni=f.example&insecure=1#PlainInsecure"]);
+  const sb = await call(env, "GET", `/sub/sgw/${READ}?format=singbox`);
+  assert.equal(sb.status, 200);
+  const data = await sb.json();
+  assert.equal(data.outbounds[0].tls.insecure, true);
+  assert.equal(data.outbounds[0].tls.certificate_public_key_sha256, undefined);
+});
+
+test("xhttp nodes are refused instead of silently degrading to tcp", async () => {
+  const env = makeEnv();
+  const xhttp = "vless://11111111-2222-3333-4444-555555555555@7.7.7.7:443?encryption=none&security=tls&sni=g.example&type=xhttp&path=%2Fx&host=g.example&mode=auto#XHTTP";
+  await reportLinks(env, "sgw", [xhttp]);
+  assert.equal((await call(env, "GET", `/sub/sgw/${READ}?format=singbox`)).status, 501);
+  assert.equal((await call(env, "GET", `/sub/sgw/${READ}?format=clash`)).status, 501);
+  assert.equal((await call(env, "GET", `/sub/sgw/${READ}`)).status, 200);
+});
+
+test("grpc serviceName and hysteria obfs survive format conversion", async () => {
+  const env = makeEnv();
+  const grpc = "vless://11111111-2222-3333-4444-555555555555@8.8.8.8:443?encryption=none&security=reality&sni=www.bing.com&fp=chrome&pbk=PUB&sid=ab&type=grpc&serviceName=svc-name#GRPC";
+  const hy = "hysteria2://pw@9.9.9.9:8443?sni=h.example&obfs=salamander&obfs-password=secret#HY";
+  await reportLinks(env, "sgw", [grpc, hy]);
+  const sb = await (await call(env, "GET", `/sub/sgw/${READ}?format=singbox`)).json();
+  const grpcOut = sb.outbounds.find((o) => o.tag === "GRPC");
+  assert.equal(grpcOut.transport.type, "grpc");
+  assert.equal(grpcOut.transport.service_name, "svc-name");
+  const hyOut = sb.outbounds.find((o) => o.tag === "HY");
+  assert.deepEqual(hyOut.obfs, { type: "salamander", password: "secret" });
+  const clash = await (await call(env, "GET", `/sub/sgw/${READ}?format=clash`)).text();
+  assert.match(clash, /grpc-service-name: "svc-name"/);
+  assert.match(clash, /obfs-password: "secret"/);
+});
+
+test("oversized bodies are rejected before being stored (413)", async () => {
+  const env = makeEnv();
+  const huge = "A".repeat(600 * 1024);
+  const res = await call(env, "POST", "/api/v1/report/sgw", huge, { ...admin, "content-type": "text/plain" });
+  assert.equal(res.status, 413);
+  assert.equal(await env.SUBS.get("report:sgw"), null);
+
+  const streamed = await worker.fetch(
+    new Request("https://sub.example.workers.dev/api/v1/report/sgw", {
+      method: "POST",
+      headers: { authorization: `Bearer ${ADMIN}` },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(enc.encode("A".repeat(300 * 1024)));
+          controller.enqueue(enc.encode("A".repeat(300 * 1024)));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    }),
+    env,
+  );
+  assert.equal(streamed.status, 413);
+  assert.equal(await env.SUBS.get("report:sgw"), null);
+});
+
+test("KV pagination is followed when listing machines", async () => {
+  const env = makeEnv();
+  env.SUBS.pageSize = 2;
+  for (const name of ["aa-one", "bb-two", "cc-three"]) {
+    await env.SUBS.put(`report:${name}`, JSON.stringify({ machine: name, content: b64(LINKS[1]), hash: "h", bytes: 1, updated_at: "t" }));
   }
-  let res = await call(env, "GET", `/sub/all/${TOKEN}`);
-  const merged = unb64(await res.text());
-  assert.match(merged, /vless:\/\/a/);
-  assert.match(merged, /vless:\/\/b/);
-
-  res = await call(env, "GET", `/sub/${TOKEN}`);
-  const shortMerged = unb64(await res.text());
-  assert.match(shortMerged, /vless:\/\/a/);
-  assert.match(shortMerged, /vless:\/\/b/);
-
-  res = await call(env, "DELETE", "/api/v1/machines/sgw", null, {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  assert.equal(res.status, 200);
-  res = await call(env, "GET", `/sub/sgw/${TOKEN}`);
-  assert.equal(res.status, 404);
+  const list = await (await call(env, "GET", "/api/v1/machines", null, admin)).json();
+  assert.equal(list.count, 3);
+  const sub = await call(env, "GET", `/sub/all/${READ}`);
+  assert.equal(unb64(await sub.text()).split("\n").filter(Boolean).length, 3);
 });
 
-const SAMPLE_LINKS = [
-  "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&sni=pypi.org&pbk=abc123&sid=deadbeef&fp=chrome&flow=xtls-rprx-vision&type=tcp#Reality-Node",
-  "anytls://secret@example.org:8443?sni=rubygems.org&insecure=1#AnyTLS-Node",
-  "tuic://22222222-2222-4222-8222-222222222222:pass@example.net:443?sni=deb.debian.org&allow_insecure=1#TUIC-Node",
-  "hysteria2://hysecret@example.io:443?sni=addons.mozilla.org&insecure=1#HY2-Node",
-];
-
-test("webui is served with token auth", async () => {
+test("delete machine clears every stored key", async () => {
   const env = makeEnv();
-  let res = await call(env, "GET", `/ui/${TOKEN}`);
-  assert.equal(res.status, 200);
-  assert.match(res.headers.get("content-security-policy"), /connect-src 'self'/);
-  const page = await res.text();
-  assert.match(page, /节点管理/);
-  assert.match(page, /机器排序/);
-  assert.match(page, /删除机器/);
-  assert.match(page, /background:#ffffff/);
-
-  res = await call(env, "GET", "/ui/wrong");
-  assert.equal(res.status, 401);
+  await reportLinks(env, "hk", LINKS);
+  await call(env, "POST", "/api/v1/machines/hk/token", null, admin);
+  await call(env, "PUT", "/api/v1/nodes/hk", JSON.stringify({ nodes: [{ link: LINKS[0] }] }), { ...admin, "content-type": "application/json" });
+  const del = await call(env, "DELETE", "/api/v1/machines/hk", null, admin);
+  assert.equal(del.status, 200);
+  const keys = [...env.SUBS.map.keys()].filter((k) => k.includes("hk"));
+  assert.deepEqual(keys, []);
 });
 
-test("machine order controls merged subscription order", async () => {
+test("legacy sub: record is still readable and migrates on edit", async () => {
   const env = makeEnv();
-  for (const [machine, text] of [
-    ["machine-a", "vless://a"],
-    ["machine-b", "tuic://b"],
-    ["machine-c", "anytls://c"],
-  ]) {
-    const res = await call(env, "POST", `/api/v1/report/${machine}`, b64(text), {
-      authorization: `Bearer ${TOKEN}`,
-    });
-    assert.equal(res.status, 200);
-  }
-  let res = await call(env, "PUT", "/api/v1/machines/order", JSON.stringify({ machines: ["machine-c", "machine-a", "machine-b"] }), {
-    authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
-  });
-  assert.equal(res.status, 200);
-
-  res = await call(env, "GET", "/api/v1/machines", null, { authorization: `Bearer ${TOKEN}` });
-  const data = await res.json();
-  assert.deepEqual(data.machines.map((m) => m.machine), ["machine-c", "machine-a", "machine-b"]);
-
-  res = await call(env, "GET", `/sub/all/${TOKEN}`);
-  const merged = unb64(await res.text()).split("\n");
-  assert.deepEqual(merged, ["anytls://c", "vless://a", "tuic://b"]);
+  await env.SUBS.put(
+    "sub:old",
+    JSON.stringify({ machine: "old", content: b64(LINKS[2]), hash: "h1", bytes: 10, updated_at: "2026-01-01T00:00:00.000Z" }),
+  );
+  const sub = await call(env, "GET", `/sub/old/${READ}`);
+  assert.equal(sub.status, 200);
+  assert.match(unb64(await sub.text()), /anytls:\/\//);
+  const list = await (await call(env, "GET", "/api/v1/machines", null, admin)).json();
+  assert.equal(list.count, 1);
 });
 
-test("default machine order follows region proximity and default node order follows protocol", async () => {
+test("ui is served without embedding credentials in the path", async () => {
   const env = makeEnv();
-  const machines = ["au-aws", "ca-oracle-nat", "de-dandan", "hk-opt", "in-amd", "my-dandan", "jp-dandan-tky", "kr-dandan", "nl-ams", "sg-dandan", "us-sje"];
-  for (const machine of machines) {
-    const res = await call(env, "POST", `/api/v1/report/${machine}`, b64("vless://one"), {
-      authorization: `Bearer ${TOKEN}`,
-    });
-    assert.equal(res.status, 200);
-  }
-  let res = await call(env, "GET", "/api/v1/machines", null, { authorization: `Bearer ${TOKEN}` });
-  const data = await res.json();
-  assert.deepEqual(data.machines.map((m) => m.machine), ["hk-opt", "kr-dandan", "jp-dandan-tky", "sg-dandan", "in-amd", "my-dandan", "us-sje", "de-dandan", "nl-ams", "ca-oracle-nat", "au-aws"]);
-
-  const links = [
-    "tuic://22222222-2222-4222-8222-222222222222:pass@example.net:443?sni=deb.debian.org#TUIC",
-    "hysteria2://hysecret@example.io:443?sni=addons.mozilla.org#HY2",
-    "socks5://user:pass@example.org:1080#SOCKS5",
-    "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=reality&sni=pypi.org&pbk=abc&sid=dead&type=tcp#Reality",
-    "vless://33333333-3333-4333-8333-333333333333@example.com:443?security=tls&type=ws&host=node.trycloudflare.com&path=%2Fargo&sni=node.trycloudflare.com#Node-Argo",
-    "vless://44444444-4444-4444-8444-444444444444@example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Fcdn&sni=cdn.example.com#Node-CDN",
-    "anytls://secret@example.org:8443?sni=rubygems.org#AnyTLS",
-  ];
-  res = await call(env, "POST", "/api/v1/report/order-proto", b64(links.join("\n")), {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  assert.equal(res.status, 200);
-  res = await call(env, "GET", "/api/v1/nodes/order-proto", null, { authorization: `Bearer ${TOKEN}` });
-  const nodeData = await res.json();
-  assert.deepEqual(nodeData.nodes.map((n) => n.name), ["Reality", "AnyTLS", "Node-Argo", "Node-CDN", "HY2", "TUIC", "SOCKS5"]);
+  const ui = await call(env, "GET", "/ui");
+  assert.equal(ui.status, 200);
+  const body = await ui.text();
+  assert.match(body, /新增机器/);
+  assert.match(body, /sessionStorage/);
+  assert.equal((await call(env, "GET", "/ui/not-admin")).status, 401);
+  assert.equal((await call(env, "GET", `/ui/${ADMIN}`)).status, 200);
 });
 
-test("subscription formats adapt from query and user-agent", async () => {
+test("invalid machine names and links are rejected", async () => {
   const env = makeEnv();
-  await call(env, "POST", "/api/v1/report/fmt", b64(SAMPLE_LINKS.join("\n")), {
-    authorization: `Bearer ${TOKEN}`,
-  });
-
-  let res = await call(env, "GET", `/sub/fmt/${TOKEN}?format=clash`);
-  assert.equal(res.status, 200);
-  assert.match(res.headers.get("content-type"), /yaml/);
-  const clash = await res.text();
-  assert.match(clash, /^proxies:/);
-  assert.match(clash, /type: vless/);
-  assert.match(clash, /type: anytls/);
-  assert.match(clash, /type: tuic/);
-  assert.match(clash, /type: hysteria2/);
-
-  res = await call(env, "GET", `/sub/fmt/${TOKEN}?format=singbox`);
-  assert.equal(res.status, 200);
-  const singbox = JSON.parse(await res.text());
-  assert.equal(singbox.outbounds.length, 4);
-  assert.equal(singbox.outbounds[0].type, "vless");
-  assert.equal(singbox.outbounds[1].type, "anytls");
-  assert.equal(singbox.outbounds[2].type, "hysteria2");
-  assert.equal(singbox.outbounds[3].type, "tuic");
-
-  res = await call(env, "GET", `/sub/fmt/${TOKEN}`, null, { "user-agent": "clash-meta/1.0" });
-  assert.match(await res.text(), /^proxies:/);
-  res = await call(env, "GET", `/sub/fmt/${TOKEN}`, null, { "user-agent": "sing-box/1.13" });
-  assert.equal(JSON.parse(await res.text()).outbounds.length, 4);
+  assert.equal((await call(env, "POST", "/api/v1/report/BAD_NAME", b64(LINKS[1]), admin)).status, 400);
+  const bad = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [{ link: "not-a-link" }] }), { ...admin, "content-type": "application/json" });
+  assert.equal(bad.status, 400);
+  assert.equal(await env.SUBS.get("manual:sgw"), null);
 });
-
-test("webui can edit links/order and reports do not overwrite manual config", async () => {
-  const env = makeEnv();
-  await call(env, "POST", "/api/v1/report/edit", b64("vless://original@example.com:443?sni=pypi.org#Original"), {
-    authorization: `Bearer ${TOKEN}`,
-  });
-
-  const body = JSON.stringify({
-    nodes: [
-      { link: SAMPLE_LINKS[1], name: "第二" },
-      { link: SAMPLE_LINKS[0], name: "第一" },
-    ],
-  });
-  let res = await call(env, "PUT", "/api/v1/nodes/edit", body, {
-    authorization: `Bearer ${TOKEN}`,
-    "content-type": "application/json",
-  });
-  assert.equal(res.status, 200);
-  let data = await res.json();
-  assert.equal(data.manual, true);
-  assert.equal(data.nodes[0].name, "第二");
-
-  res = await call(env, "GET", "/api/v1/nodes/edit", null, { authorization: `Bearer ${TOKEN}` });
-  data = await res.json();
-  assert.equal(data.nodes.length, 2);
-  assert.equal(data.nodes[0].link, SAMPLE_LINKS[1]);
-
-  // 新的自动上报不应覆盖手动配置
-  res = await call(env, "POST", "/api/v1/report/edit", b64("vless://new@example.com:443?sni=deb.debian.org#New"), {
-    authorization: `Bearer ${TOKEN}`,
-  });
-  data = await res.json();
-  assert.equal(data.manual, true);
-  res = await call(env, "GET", "/api/v1/nodes/edit", null, { authorization: `Bearer ${TOKEN}` });
-  data = await res.json();
-  assert.equal(data.nodes.length, 2);
-  assert.equal(data.nodes[0].link, SAMPLE_LINKS[1]);
-
-  // 合并订阅按保存顺序返回
-  res = await call(env, "GET", `/sub/all/${TOKEN}`);
-  const merged = unb64(await res.text());
-  assert.ok(merged.indexOf(SAMPLE_LINKS[1]) < merged.indexOf(SAMPLE_LINKS[0]));
-
-  // reset 后恢复自动上报内容
-  res = await call(env, "POST", "/api/v1/machines/edit/reset", null, { authorization: `Bearer ${TOKEN}` });
-  assert.equal(res.status, 200);
-  data = await res.json();
-  assert.equal(data.manual, false);
-  assert.equal(data.nodes.length, 1);
-});
-
