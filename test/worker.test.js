@@ -77,7 +77,7 @@ test("health exposes role separation", async () => {
   assert.equal(res.status, 200);
   const data = await res.json();
   assert.equal(data.ok, true);
-  assert.equal(data.version, "2.0.0");
+  assert.match(data.version, /^\d+\.\d+\.\d+$/, "版本号随发布递增，测试只校验格式");
   assert.equal(data.roles.admin, true);
   assert.equal(data.roles.read, true);
   assert.equal(data.roles.per_machine_report, true);

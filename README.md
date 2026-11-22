@@ -55,14 +55,26 @@ binding = "SUBS"
 id = "你的 KV namespace id"
 ```
 
-### 2. 设置密钥
+### 2. 设置密钥（只设一个）
 
 ```bash
-pnpm exec wrangler secret put ADMIN_TOKEN   # 管理：WebUI + 全部管理接口
-pnpm exec wrangler secret put READ_TOKEN    # 只读：订阅 URL 用
+pnpm exec wrangler secret put TOKEN      # 粘一个 UUID v4
 ```
 
-三者关系：
+就这一个。它同时是三件事的钥匙：
+
+| 用途 | 怎么用 |
+|---|---|
+| 管理后台 | 打开 `https://<worker>/ui`，粘贴同一个 token |
+| 订阅 | `https://<worker>/sub/<TOKEN>`（`?format=clash` / `?format=singbox` 可选） |
+| 机器上报 | 请求头 `Authorization: Bearer <TOKEN>`，或每台机器用 WebUI“密钥”单独发的按机密钥 |
+
+按机密钥是可选的：WebUI 机器行右侧“密钥”生成，Worker 只存它的 SHA-256，适合“某台机器只该写自己”的场景；不想管就全机队共用 `TOKEN`。
+`TOKEN` 不要设 `ALLOW_LEGACY_TOKEN=0`，否则这把唯一的钥匙也会失效（除非另配了独立密钥，见下面的进阶拆分）。
+
+#### 进阶：拆成三套独立凭据（可选）
+
+只有当你想“订阅泄露也不影响管理”“某台机器被入侵只影响自己”时才需要：
 
 | 密钥 | 能做什么 | 是否出现在订阅 URL |
 |---|---|---|
@@ -70,10 +82,9 @@ pnpm exec wrangler secret put READ_TOKEN    # 只读：订阅 URL 用
 | `READ_TOKEN` | 只读订阅（`/sub/...`） | 是（订阅 URL 的 token） |
 | 每机上报密钥 | 只能给授权的那台机器上报 | 否（放在上报请求头） |
 | `REPORT_TOKEN` | 可选：给所有机器上报 | 否 |
-| `TOKEN`（旧） | 旧版共享密钥；设 `ALLOW_LEGACY_TOKEN=0` 后彻底禁用 | 是（兼容期） |
+| `TOKEN` | 兜底主密钥；设了 `ADMIN_TOKEN`/`READ_TOKEN` 后它们优先 | 是 |
 
-建议 `ADMIN_TOKEN`、`READ_TOKEN` 都用 UUID v4 或 32 字节随机 URL-safe 字符串，并且彼此不同。
-按机上报密钥在 WebUI 的“密钥”按钮生成，Worker 只保存它的 SHA-256。
+拆分时三个值都要不同，并且只有在都配好之后才能把 `ALLOW_LEGACY_TOKEN` 设为 `0`。
 
 #### `ALLOW_LEGACY_TOKEN` 在哪里设置
 

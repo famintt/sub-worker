@@ -6,7 +6,7 @@
 // KV 绑定变量名必须是 SUBS。
 
 /**
- * sub-worker v2.0.1
+ * sub-worker v2.0.2
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -29,7 +29,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.1";
+const VERSION = "2.0.2";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -78,13 +78,13 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 <body>
 <div id="login"><div class="box">
 <h3>sub-worker 管理登录</h3>
-<div class="hint">管理密钥不会出现在 URL 里；只保存在本浏览器 sessionStorage。</div>
-<input id="login-token" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password">
+<div class="hint">访问密钥只存在本浏览器 sessionStorage，不出现在 URL 里；同一个密钥也用于订阅和机器上报。</div>
+<input id="login-token" type="password" placeholder="访问密钥（TOKEN）" autocomplete="current-password">
 <div class="row"><button id="login-go" class="primary" type="button">登录</button><span id="login-msg" class="status"></span></div>
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.1</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.2</span></div>
 
 
 <section class="card">
@@ -254,7 +254,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
   }
   $("login-go").onclick = function () {
     var t = ($("login-token").value || "").trim();
-    if (!t) { setStatus("login-msg", "请输入管理密钥", false); return; }
+    if (!t) { setStatus("login-msg", "请输入访问密钥", false); return; }
     sessionStorage.setItem(STORE, t);
     api("/machines").then(function () { showLogin(false); setStatus("login-msg", "", null); boot(); })
       .catch(function (e) { sessionStorage.removeItem(STORE); setStatus("login-msg", "登录失败：" + e.message, false); });
