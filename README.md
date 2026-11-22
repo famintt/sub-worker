@@ -106,6 +106,26 @@ ALLOW_LEGACY_TOKEN = "0"
 判断逻辑很简单：只有值**恰好等于 `"0"`** 才算关闭旧 token；不设、空值、`"false"`、`"off"` 都仍按“开启兼容”处理。
 改完访问 `https://<worker>/health`，`roles.legacy_token` 应该变成 `false`。
 
+#### 单 token 模式（想少记几个串就选它）
+
+如果不想区分三套凭据，把三个位置都设成同一个值即可，权限仍是“都能干”，但只需要记一串：
+
+```bash
+U=你的UUID
+printf '%s' "$U" | pnpm exec wrangler secret put ADMIN_TOKEN
+printf '%s' "$U" | pnpm exec wrangler secret put READ_TOKEN
+printf '%s' "$U" | pnpm exec wrangler secret put TOKEN      # 上报用，兼容期
+```
+
+之后这一串同时适用于：
+
+- WebUI 登录：`https://<worker>/ui`
+- 订阅地址：`https://<worker>/sub/<UUID>`
+- 机器上报：`Authorization: Bearer <UUID>`
+
+`/health` 里 `roles` 全为 `true` 就说明生效了。缺点是这台 token 一旦泄露，读写和上报一起丢，适合自己的单人机队；
+想收紧时再按上面的“迁移顺序”换成三套独立凭据，代码不用改。
+
 #### 迁移顺序（重要）
 
 `ALLOW_LEGACY_TOKEN=0` 会**同时切断**旧 `TOKEN` 的读取和上报。现在机队还在用旧 token 上报，直接关掉会立刻停更，所以按这个顺序：

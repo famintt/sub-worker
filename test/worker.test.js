@@ -186,14 +186,15 @@ test("If-Match conflict is reported instead of silently overwriting", async () =
   assert.equal(ok.status, 200);
 });
 
-test("create machine writes an empty manual override", async () => {
+test("create machine registers it without an empty manual override", async () => {
   const env = makeEnv();
   const created = await call(env, "POST", "/api/v1/machines/new-york", JSON.stringify({}), { ...admin, "content-type": "application/json" });
   assert.equal(created.status, 200);
   const list = await (await call(env, "GET", "/api/v1/machines", null, admin)).json();
   assert.equal(list.count, 1);
   assert.equal(list.machines[0].machine, "new-york");
-  assert.equal(list.machines[0].manual, true);
+  // 空 manual 会遮蔽后续上报，所以新建机器只登记顺序，不写 manual。
+  assert.equal(list.machines[0].manual, false);
   assert.equal(list.machines[0].nodes, 0);
 });
 
@@ -351,4 +352,34 @@ test("served UI script must be syntactically valid javascript", async () => {
   assert.ok(m, "UI 必须内联一个脚本");
   assert.doesNotThrow(() => new Function(m[1]));
   assert.ok(m[1].includes("split(/\\r?\\n/)"), "换行拆分正则必须保留反斜杠");
+});
+
+test("creating a machine must not shadow later reports", async () => {
+  const env = makeEnv();
+  const created = await call(env, "POST", "/api/v1/machines/empty-box", "{}", {
+    ...admin,
+    "content-type": "application/json",
+  });
+  assert.equal(created.status, 200);
+  const createdBody = await created.json();
+  assert.equal(createdBody.nodes, 0);
+  assert.equal(createdBody.manual, false, "空机器不能被写成空 manual");
+
+  const rep = await reportLinks(env, "empty-box", LINKS.slice(0, 2));
+  assert.equal(rep.status, 200);
+  const list = await (await call(env, "GET", "/api/v1/machines", undefined, admin)).json();
+  const row = list.machines.find((m) => m.machine === "empty-box");
+  assert.ok(row, "登记的机器要出现在列表里");
+  assert.equal(row.nodes, 2, "上报后节点数应来自 report 而不是被空 manual 遮蔽");
+  assert.equal(row.manual, false);
+});
+
+test("a reported machine stays listed even with no manual override", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "only-report", LINKS.slice(1, 3));
+  const list = await (await call(env, "GET", "/api/v1/machines", undefined, admin)).json();
+  const row = list.machines.find((m) => m.machine === "only-report");
+  assert.ok(row);
+  assert.equal(row.nodes, 2);
+  assert.equal(row.manual, false);
 });

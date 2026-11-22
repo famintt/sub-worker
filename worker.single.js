@@ -6,7 +6,7 @@
 // KV 绑定变量名必须是 SUBS。
 
 /**
- * sub-worker v2.0.0
+ * sub-worker v2.0.1
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -29,7 +29,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -84,7 +84,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.0</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.1</span></div>
 
 
 <section class="card">
@@ -516,6 +516,10 @@ async function loadManual(env, machine) {
 
 async function machineSet(env) {
   const names = new Set();
+  // 登记表里先出现的机器即使还没有任何上报/手工节点，也要在 UI 里可见。
+  for (const name of await getMachineOrder(env)) {
+    if (MACHINE_RE.test(name)) names.add(name);
+  }
   for (const prefix of ["report:", "manual:", "sub:"]) {
     for (const key of await listAllKeys(env, prefix)) {
       const name = key.slice(prefix.length);
@@ -648,13 +652,25 @@ async function putNodeConfig(request, env, machine) {
 }
 
 async function createMachine(env, machine) {
+  if (!MACHINE_RE.test(machine)) return json({ ok: false, error: "invalid machine name" }, 400);
   const rep = await loadReport(env, machine);
   const manual = await loadManual(env, machine);
-  if (!rep && !manual) {
-    await env.SUBS.put(`manual:${machine}`, JSON.stringify({ machine, nodes: [], updated_at: new Date().toISOString() }));
-  }
+  // 只登记机器，不写空 manual：空 manual 会遮蔽后续上报（nodesOf 手工优先）。
   const order = await getMachineOrder(env);
-  return json({ ok: true, machine, created: !rep && !manual, manual: Boolean(manual) || (!rep && !manual), machine_order: order });
+  if (!order.includes(machine)) {
+    order.push(machine);
+    await env.SUBS.put("meta:machine_order", JSON.stringify(order));
+  }
+  const nodes = await nodesOf(env, machine);
+  return json({
+    ok: true,
+    machine,
+    created: !rep && !manual,
+    manual: Boolean(manual),
+    has_report: Boolean(rep),
+    nodes: nodes.length,
+    machine_order: order,
+  });
 }
 
 async function resetMachine(env, machine) {
