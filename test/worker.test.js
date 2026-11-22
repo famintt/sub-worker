@@ -164,16 +164,43 @@ test("manual override survives later reports; reset restores the snapshot", asyn
   assert.equal(after.nodes.length, 2);
 });
 
-test("empty manual array is a valid override and does not fall back to the snapshot", async () => {
+test("saving an empty list clears the manual override instead of shadowing reports", async () => {
   const env = makeEnv();
   await reportLinks(env, "sgw", LINKS);
   const put = await call(env, "PUT", "/api/v1/nodes/sgw", JSON.stringify({ nodes: [] }), { ...admin, "content-type": "application/json" });
   assert.equal(put.status, 200);
+  const putBody = await put.json();
+  assert.equal(putBody.manual, false);
+  assert.equal(putBody.cleared, true);
   const cfg = await (await call(env, "GET", "/api/v1/nodes/sgw", null, admin)).json();
+  assert.equal(cfg.manual, false, "空手工覆盖要被自动删除");
+  assert.equal(cfg.nodes.length, LINKS.length, "删掉覆盖后应回到自动上报的节点");
+});
+
+test("an empty manual record left behind is cleaned up automatically", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "stale", LINKS.slice(0, 2));
+  // 模拟历史版本写下的空 manual（例如旧版“新增机器”留下的空壳）。
+  await env.SUBS.put("manual:stale", JSON.stringify({ machine: "stale", nodes: [], updated_at: "2026-01-01T00:00:00.000Z" }));
+  const cfg = await (await call(env, "GET", "/api/v1/nodes/stale", null, admin)).json();
+  assert.equal(cfg.manual, false);
+  assert.equal(cfg.nodes.length, 2);
+  assert.equal(await env.SUBS.get("manual:stale"), null, "空 manual 键要被删除");
+});
+
+test("a non-empty manual override is never overwritten or dropped by reports", async () => {
+  const env = makeEnv();
+  const manualLink = LINKS[2];
+  await call(env, "PUT", "/api/v1/nodes/keep", JSON.stringify({ nodes: [{ link: manualLink, name: "KEEP-AnyTLS" }] }), {
+    ...admin,
+    "content-type": "application/json",
+  });
+  await reportLinks(env, "keep", LINKS.slice(0, 3));
+  const cfg = await (await call(env, "GET", "/api/v1/nodes/keep", null, admin)).json();
   assert.equal(cfg.manual, true);
-  assert.equal(cfg.nodes.length, 0);
-  const sub = await call(env, "GET", `/sub/sgw/${READ}`);
-  assert.equal(unb64(await sub.text()), "");
+  assert.equal(cfg.nodes.length, 1);
+  assert.equal(cfg.nodes[0].name, "KEEP-AnyTLS");
+  assert.equal(await env.SUBS.get("manual:keep") === null, false, "手工配置不能被自动删除");
 });
 
 test("If-Match conflict is reported instead of silently overwriting", async () => {

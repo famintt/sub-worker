@@ -6,7 +6,7 @@
 // KV 绑定变量名必须是 SUBS。
 
 /**
- * sub-worker v2.0.2
+ * sub-worker v2.0.3
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -29,7 +29,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.2";
+const VERSION = "2.0.3";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -84,7 +84,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；手动配置优先于自动上报。</div></div><span class="ver" id="version">v2.0.2</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.3</span></div>
 
 
 <section class="card">
@@ -115,7 +115,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 <div class="subrow"><span class="tip">通用 base64</span><code id="url-base"></code><button data-copy="url-base" type="button">复制</button></div>
 <div class="subrow"><span class="tip">Clash / Mihomo</span><code id="url-clash"></code><button data-copy="url-clash" type="button">复制</button></div>
 <div class="subrow"><span class="tip">sing-box</span><code id="url-singbox"></code><button data-copy="url-singbox" type="button">复制</button></div>
-<div class="hint">手动保存后，机器自动上报不会覆盖你编辑的节点；点“恢复自动上报”才会回到最近一次自动快照。</div>
+<div class="hint">手动保存（非空）后，自动上报不会覆盖你的节点，也不会被自动删除；保存空列表等于撤销手动，节点回到自动上报。</div>
 </section>
 </div>
 <script>
@@ -508,9 +508,20 @@ async function loadReport(env, machine) {
 
 async function loadManual(env, machine) {
   const rec = await env.SUBS.get(`manual:${machine}`, { type: "json" });
-  if (rec && Array.isArray(rec.nodes)) return rec;
+  if (rec && Array.isArray(rec.nodes)) {
+    // 空的手工覆盖没有任何内容，却会挡住自动上报（manual 优先），直接清掉让它回到上报数据。
+    if (rec.nodes.length === 0) {
+      await env.SUBS.delete(`manual:${machine}`);
+      return null;
+    }
+    return rec;
+  }
   const legacy = await loadReport(env, machine);
-  if (legacy && legacy.legacy_manual) return { machine, nodes: legacy.legacy_nodes || [], updated_at: legacy.updated_at };
+  if (legacy && legacy.legacy_manual) {
+    const nodes = (legacy.legacy_nodes || []).slice();
+    if (nodes.length === 0) return null;
+    return { machine, nodes, updated_at: legacy.updated_at };
+  }
   return null;
 }
 
@@ -646,6 +657,21 @@ async function putNodeConfig(request, env, machine) {
     inputs.push({ link, name: typeof item.name === "string" ? item.name.trim().slice(0, 160) : "" });
   }
   const nodes = await normalizeNodes(links, [], inputs);
+  // 保存空列表等于撤销手工覆盖：删掉覆盖键，让节点回到自动上报，而不是留一个空壳挡住上报。
+  if (nodes.length === 0) {
+    await env.SUBS.delete(`manual:${machine}`);
+    const rep = await loadReport(env, machine);
+    const fallback = await nodesOf(env, machine);
+    return json({
+      ok: true,
+      machine,
+      manual: false,
+      cleared: true,
+      has_report: Boolean(rep),
+      nodes: fallback,
+      updated_at: (rep && rep.updated_at) || "",
+    });
+  }
   const updatedAt = new Date().toISOString();
   await env.SUBS.put(`manual:${machine}`, JSON.stringify({ machine, nodes, updated_at: updatedAt }));
   return json({ ok: true, machine, manual: true, nodes, updated_at: updatedAt });

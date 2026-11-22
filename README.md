@@ -7,7 +7,7 @@
 ## 特性
 
 - 固定订阅 URL，重启/重新部署 Worker 不变；
-- **凭据分权**：`ADMIN_TOKEN` 管管理、`READ_TOKEN` 只管读订阅、每台机器还能有独立上报密钥，三者互不越权；
+- **单密钥可用**：只设一个 `TOKEN` 就能管理、订阅、上报；需要时可拆成 `ADMIN_TOKEN`/`READ_TOKEN`/按机密钥；
 - 每台机器一个 `machine` slug，支持单机和合并订阅；
 - **WebUI 可以直接新增机器**，不依赖机器先上报；
 - Cloudflare KV 存储，按内容 SHA-256 去重，相同内容不重复写；
@@ -184,7 +184,7 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
    - Variable name：`SUBS`
    - KV namespace：刚创建的那个；
 4. Settings → Variables and Secrets 添加 Secrets：
-   - `ADMIN_TOKEN`：管理密钥；
+   - `TOKEN`（或拆分后的 `ADMIN_TOKEN`）：访问密钥；
    - `READ_TOKEN`：订阅读取密钥；
 5. Deploy；
 6. 需要自定义域名时，在 Domains & Routes 绑定。
@@ -197,8 +197,8 @@ Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add Cust
 https://<worker>/ui
 ```
 
-首次打开输入 `ADMIN_TOKEN`，只存在浏览器 `sessionStorage`，不再把凭据放进 URL。
-旧路径 `/ui/<ADMIN_TOKEN>` 仍可用（要求是管理密钥）。
+首次打开输入访问密钥（`TOKEN`），只存在浏览器 `sessionStorage`，不再把凭据放进 URL。
+旧路径 `/ui/<TOKEN>` 仍可用（要求有管理权限的密钥）。
 
 界面支持：
 
@@ -209,11 +209,15 @@ https://<worker>/ui
 - 修改节点链接和显示名称；
 - 上移、下移调整节点顺序；
 - 添加、删除节点；
-- 清空某台机器的节点（空数组也是有效的手动覆盖，不会被自动上报“复活”）；
+- 清空某台机器的节点（保存空列表 = 撤销手动覆盖，节点回到自动上报）；
 - 保存后订阅立即按新顺序生成；
 - “恢复自动上报”会清除手动配置，重新采用最近一次上报内容。
 
-手动保存后，机器继续自动上报也不会覆盖已编辑节点；需要恢复自动更新时点“恢复自动上报”。
+手动配置的规则：
+
+- **非空**的手动配置是“锁定的”：机器继续上报不会覆盖它，也不会被自动删除；
+- **空**的手动配置没有意义，会被自动清理，节点回到最近一次自动上报；
+- 想放弃手动、回到自动更新：保存空列表，或点“恢复自动上报”。
 
 ## 订阅格式
 
@@ -315,7 +319,7 @@ URL 路径：  /sub/abc%2Bdef%3Dghi
 
 ```http
 POST /api/v1/report/:machine
-Authorization: Bearer <该机器上报密钥 | ADMIN_TOKEN | REPORT_TOKEN>
+Authorization: Bearer <该机器上报密钥 | TOKEN | REPORT_TOKEN>
 Content-Type: text/plain
 Body: base64 编码的订阅内容
 ```
@@ -344,10 +348,10 @@ curl -X POST \
 | `GET` | `/sub/:machine/:token` | 单机订阅 |
 | `GET` | `/sub/:token` | 全部机器合并订阅（推荐） |
 | `GET` | `/sub/all/:token` | 合并订阅的兼容旧路径 |
-| `GET` | `/ui` | WebUI（登录时输入 `ADMIN_TOKEN`） |
+| `GET` | `/ui` | WebUI（登录时输入访问密钥 `TOKEN`） |
 | `GET` | `/ui/:admin_token` | 兼容旧路径，要求管理密钥 |
-| `GET` | `/api/v1/settings` | 读取 `read_token` 供 UI 拼订阅 URL，Bearer `ADMIN_TOKEN` |
-| `POST` | `/api/v1/machines/:machine` | 新建机器（写空的手动覆盖），Bearer `ADMIN_TOKEN` |
+| `GET` | `/api/v1/settings` | 读取 `read_token` 供 UI 拼订阅 URL，Bearer `TOKEN` |
+| `POST` | `/api/v1/machines/:machine` | 新建机器（只登记顺序，不写空的手动覆盖），Bearer `TOKEN` |
 | `POST` | `/api/v1/machines/:machine/token` | 生成/轮换该机上报密钥，只返回一次明文 |
 | `GET` | `/api/v1/machines/:machine/token` | 查询是否已有上报密钥 |
 | `DELETE` | `/api/v1/machines/:machine/token` | 吊销上报密钥 |
@@ -442,7 +446,7 @@ sub_machine='machine-a'
 
 ## 安全
 
-- `ADMIN_TOKEN`、`READ_TOKEN`、按机上报密钥都是 bearer secret，用 Secret 类型，不要提交到仓库；
+- `TOKEN`（以及可选拆分的 `ADMIN_TOKEN`/`READ_TOKEN`/按机密钥）都是 bearer secret，用 Secret 类型，不要提交到仓库；
 - 管理接口只接受 `ADMIN_TOKEN`；只读 token 读不了机器列表，也改不了节点；
 - 按机上报密钥的明文只在生成时返回一次，KV 里只有 SHA-256；泄露后点“密钥”重新生成即可（旧密钥立即失效）；
 - 订阅内容包含节点 UUID/密码，`READ_TOKEN` 必须不可猜；`READ_TOKEN` 泄露时轮换它，旧订阅 URL 立即失效；
