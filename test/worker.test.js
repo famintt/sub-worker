@@ -247,7 +247,9 @@ test("duplicate and blank names are made unique and readable", async () => {
 
   const clash = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
   assert.equal(clash.status, 200);
-  const names = [...(await clash.text()).matchAll(/^  - name: (.+)$/gm)].map((match) => JSON.parse(match[1]));
+  // 只取 proxies 段，proxy-groups 里也有 "  - name:" 行
+  const proxiesPart = (await clash.text()).split("proxy-groups:")[0];
+  const names = [...proxiesPart.matchAll(/^  - name: (.+)$/gm)].map((match) => JSON.parse(match[1]));
   assert.deepEqual(names, ["Duplicate", "Duplicate (2)", "trojan-3.3.3.3:443"]);
 
   const sb = await call(env, "GET", `/sub/sgw/${READ}?format=singbox`);
@@ -315,10 +317,34 @@ test("an empty merged subscription is valid, not a format error", async () => {
   const env = makeEnv();
   const clash = await call(env, "GET", `/sub/all/${READ}?format=clash`);
   assert.equal(clash.status, 200);
-  assert.equal((await clash.text()).trim(), "proxies:");
+  const emptyYaml = await clash.text();
+  assert.match(emptyYaml, /^proxies: \[\]$/m);
+  assert.match(emptyYaml, /- MATCH,DIRECT/);
+  assert.doesNotMatch(emptyYaml, /proxy-groups:/);
   const sb = await call(env, "GET", `/sub/all/${READ}?format=singbox`);
   assert.equal(sb.status, 200);
   assert.deepEqual((await sb.json()).outbounds, []);
+});
+
+test("clash output ships proxy groups so clients can list and select nodes", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", [
+    "trojan://pw@1.1.1.1:443?sni=a.example&allowInsecure=1#NodeA",
+    "tuic://11111111-2222-3333-4444-555555555555:pw@2.2.2.2:8443?sni=b.example&allow_insecure=1#NodeB",
+  ]);
+  const res = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
+  assert.equal(res.status, 200);
+  const yaml = await res.text();
+  assert.match(yaml, /^proxy-groups:$/m);
+  assert.match(yaml, /- name: PROXY\n    type: select/);
+  assert.match(yaml, /- name: 自动选择\n    type: url-test/);
+  assert.match(yaml, /url: https:\/\/www\.gstatic\.com\/generate_204/);
+  assert.match(yaml, /rules:\n  - MATCH,PROXY/);
+  // 组内引用必须与 proxies 里的名字一致
+  for (const name of ["NodeA", "NodeB"]) {
+    assert.ok(yaml.includes(`  - name: "${name}"`), `missing proxy ${name}`);
+    assert.ok(yaml.includes(`      - "${name}"`), `missing group member ${name}`);
+  }
 });
 
 test("grpc serviceName and hysteria obfs survive format conversion", async () => {

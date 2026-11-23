@@ -1,6 +1,6 @@
 {
   "name": "sub-worker",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "private": true,
   "type": "module",
   "description": "Fixed subscription endpoint with per-machine report tokens, admin/read separation, clash & sing-box output",

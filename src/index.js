@@ -1,5 +1,5 @@
 /**
- * sub-worker v2.0.4
+ * sub-worker v2.0.5
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -22,7 +22,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.4";
+const VERSION = "2.0.5";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -77,7 +77,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.4</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.5</span></div>
 
 
 <section class="card">
@@ -1043,7 +1043,8 @@ function uniqueNodeName(value, used) {
 }
 
 function toClash(nodes) {
-  const lines = ["proxies:"];
+  const lines = ["mode: rule", "proxies:"];
+  const names = [];
   const unsupported = [];
   const usedNames = new Set();
   let count = 0;
@@ -1061,6 +1062,7 @@ function toClash(nodes) {
       continue;
     }
     const name = uniqueNodeName(displayName, usedNames);
+    names.push(name);
     count += 1;
     lines.push(`  - name: ${yamlString(name)}`);
     lines.push(`    type: ${p.kind === "hy2" ? "hysteria2" : p.kind}`);
@@ -1140,6 +1142,25 @@ function toClash(nodes) {
       }
     }
   }
+  if (!count) {
+    // 空订阅也要给出合法配置，否则客户端会整份加载失败。
+    return { text: "mode: direct\nproxies: []\nrules:\n  - MATCH,DIRECT\n", unsupported, count };
+  }
+  // Clash Verge / Mihomo 的"代理"页只展示 proxy-groups，没有组就显示"未获取到代理信息"。
+  lines.push("proxy-groups:");
+  lines.push("  - name: PROXY");
+  lines.push("    type: select");
+  lines.push("    proxies:");
+  for (const name of names) lines.push(`      - ${yamlString(name)}`);
+  lines.push("  - name: 自动选择");
+  lines.push("    type: url-test");
+  lines.push("    url: https://www.gstatic.com/generate_204");
+  lines.push("    interval: 300");
+  lines.push("    tolerance: 50");
+  lines.push("    proxies:");
+  for (const name of names) lines.push(`      - ${yamlString(name)}`);
+  lines.push("rules:");
+  lines.push("  - MATCH,PROXY");
   return { text: lines.join("\n") + "\n", unsupported, count };
 }
 
