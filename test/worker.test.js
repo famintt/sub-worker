@@ -237,6 +237,25 @@ test("machine order controls /sub/all ordering", async () => {
   assert.equal(sub.headers.get("x-machine-order"), "us-one,hk-one");
 });
 
+test("duplicate and blank names are made unique and readable", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", [
+    "trojan://pw@1.1.1.1:443?sni=a.example#Duplicate",
+    "trojan://pw@2.2.2.2:443?sni=b.example#Duplicate",
+    "trojan://pw@3.3.3.3:443?sni=c.example#%20",
+  ]);
+
+  const clash = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
+  assert.equal(clash.status, 200);
+  const names = [...(await clash.text()).matchAll(/^  - name: (.+)$/gm)].map((match) => JSON.parse(match[1]));
+  assert.deepEqual(names, ["Duplicate", "Duplicate (2)", "trojan-3.3.3.3:443"]);
+
+  const sb = await call(env, "GET", `/sub/sgw/${READ}?format=singbox`);
+  assert.equal(sb.status, 200);
+  const data = await sb.json();
+  assert.deepEqual(data.outbounds.map((outbound) => outbound.tag), ["Duplicate", "Duplicate (2)", "trojan-3.3.3.3:443"]);
+});
+
 test("pinSHA256 is preserved for Clash and refused for sing-box", async () => {
   const env = makeEnv();
   const pinned = "anytls://pw@6.6.6.6:443?sni=f.example&pinSHA256=AB:CD:EF:01&insecure=1#Pinned";
@@ -270,6 +289,36 @@ test("xhttp nodes are refused instead of silently degrading to tcp", async () =>
   assert.equal((await call(env, "GET", `/sub/sgw/${READ}?format=singbox`)).status, 501);
   assert.equal((await call(env, "GET", `/sub/sgw/${READ}?format=clash`)).status, 501);
   assert.equal((await call(env, "GET", `/sub/sgw/${READ}`)).status, 200);
+});
+
+test("partially unsupported nodes do not break the whole subscription", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", [
+    "trojan://pw@1.1.1.1:443?sni=a.example#Good",
+    "vless://11111111-2222-3333-4444-555555555555@7.7.7.7:443?encryption=none&security=tls&sni=g.example&type=xhttp&path=%2Fx&host=g.example&mode=auto#XHTTP",
+  ]);
+  const clash = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
+  assert.equal(clash.status, 200);
+  assert.equal(clash.headers.get("x-unsupported-nodes"), "1");
+  const yaml = await clash.text();
+  assert.match(yaml, /name: "Good"/);
+  assert.doesNotMatch(yaml, /XHTTP/);
+
+  const sb = await call(env, "GET", `/sub/sgw/${READ}?format=singbox`);
+  assert.equal(sb.status, 200);
+  assert.equal(sb.headers.get("x-unsupported-nodes"), "1");
+  const data = await sb.json();
+  assert.deepEqual(data.outbounds.map((o) => o.tag), ["Good"]);
+});
+
+test("an empty merged subscription is valid, not a format error", async () => {
+  const env = makeEnv();
+  const clash = await call(env, "GET", `/sub/all/${READ}?format=clash`);
+  assert.equal(clash.status, 200);
+  assert.equal((await clash.text()).trim(), "proxies:");
+  const sb = await call(env, "GET", `/sub/all/${READ}?format=singbox`);
+  assert.equal(sb.status, 200);
+  assert.deepEqual((await sb.json()).outbounds, []);
 });
 
 test("grpc serviceName and hysteria obfs survive format conversion", async () => {

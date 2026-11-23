@@ -12,7 +12,7 @@
 - **WebUI 可以直接新增机器**，不依赖机器先上报；
 - Cloudflare KV 存储，按内容 SHA-256 去重，相同内容不重复写；
 - **WebUI 可以编辑节点链接、节点名称、机器顺序和节点顺序**；
-- **自动适配 base64 / Clash / sing-box 订阅格式**；格式表达不了的节点（证书指纹 pin、xhttp 传输）会明确返回 501，不静默降级；
+- **自动适配 base64 / Clash / sing-box 订阅格式**；格式表达不了的节点（证书指纹 pin、xhttp 传输）会被单独跳过并在 `x-unsupported-nodes` 响应头里标注数量，不会静默降级、也不会拖垮整份订阅；
 - 手动编辑后，机器自动上报不会覆盖手动配置；
 - 支持 `workers.dev` 默认域名和自定义域名；
 - 自动从请求 `Origin` 推断对外域名，无需配置 `PUBLIC_BASE_URL`；
@@ -396,6 +396,11 @@ curl https://<worker>/sub/machine-a/<TOKEN>
 ```
 
 默认返回 `text/plain` 的 base64 订阅内容；带 `?format=clash` 或 `?format=singbox` 返回对应格式。
+
+Clash / sing-box 格式的两条约定：
+
+- **节点名唯一**：Clash/Mihomo 与 sing-box 都拒绝重复的代理名（Mihomo 报 `proxy X is the duplicate name`，整份配置校验失败）。合并订阅时会给重复名字加 ` (2)`、` (3)` 后缀；名字为空或只有空白时回退成 `trojan-1.2.3.4:443` 这样的可读名。
+- **部分节点不可表达**：例如 Clash 不支持 `xhttp` 传输、sing-box 不支持证书指纹 pin。这类节点会被跳过，响应头 `x-unsupported-nodes` 给出跳过的数量，其余节点照常返回；只有**一个可表达节点都没有**时才返回 501。需要完整节点列表时用默认的 base64 订阅。
 
 ## 多机上报
 

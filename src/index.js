@@ -1,5 +1,5 @@
 /**
- * sub-worker v2.0.3
+ * sub-worker v2.0.4
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -22,7 +22,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.3";
+const VERSION = "2.0.4";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -77,7 +77,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.3</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.4</span></div>
 
 
 <section class="card">
@@ -995,15 +995,24 @@ function subResponse(nodes, request, extraHeaders) {
   const headers = { ...corsHeaders(), "cache-control": "no-store, max-age=0", "profile-update-interval": "6", ...(extraHeaders || {}) };
   if (format === "clash") {
     const built = toClash(nodes);
-    if (built.unsupported.length) return unsupportedResponse(format, built.unsupported);
-    return new Response(built.text, { headers: { ...headers, "content-type": "text/yaml; charset=utf-8" } });
+    return builtFormatResponse(format, built, headers, "text/yaml; charset=utf-8", nodes.length);
   }
   if (format === "singbox") {
     const built = toSingbox(nodes);
-    if (built.unsupported.length) return unsupportedResponse(format, built.unsupported);
-    return new Response(built.text, { headers: { ...headers, "content-type": "application/json; charset=utf-8" } });
+    return builtFormatResponse(format, built, headers, "application/json; charset=utf-8", nodes.length);
   }
   return new Response(encodeBase64(nodes.map((n) => n.link).join("\n")), { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+}
+
+// 目标格式表达不了的节点（xhttp、证书指纹等）只跳过该节点并在头部标注数量。
+// 整份订阅 501 会让客户端连可用节点都加载不出来（Clash 直接显示订阅无效），
+// 所以只有"一个可表达的节点都没有"时才是错误；跳过不等于降级，不会削弱任何节点。
+function builtFormatResponse(format, built, headers, contentType, total) {
+  // 机器本来就没有节点：返回空列表是正常状态，不是格式错误。
+  if (!built.count && total) return unsupportedResponse(format, built.unsupported);
+  const out = { ...headers, "content-type": contentType };
+  if (built.unsupported.length) out["x-unsupported-nodes"] = String(built.unsupported.length);
+  return new Response(built.text, { headers: out });
 }
 
 function unsupportedResponse(format, nodes) {
@@ -1016,22 +1025,43 @@ function unsupportedResponse(format, nodes) {
 
 function yamlString(value) { return JSON.stringify(String(value == null ? "" : value)); }
 
+// Clash/Mihomo 与 sing-box 都要求代理名唯一，重复名会让整份配置校验失败
+// （mihomo: "proxy X is the duplicate name"），订阅于是完全无法识别。
+function displayNodeName(node, proxy) {
+  const raw = String(node.name == null ? proxy.name == null ? "" : proxy.name : node.name).trim();
+  if (raw) return raw;
+  const kind = proxy.kind ? String(proxy.kind) : "node";
+  return `${kind}-${proxy.server}:${proxy.port}`;
+}
+
+function uniqueNodeName(value, used) {
+  const base = String(value).trim() || "node";
+  let name = base;
+  for (let suffix = 2; used.has(name); suffix += 1) name = `${base} (${suffix})`;
+  used.add(name);
+  return name;
+}
+
 function toClash(nodes) {
   const lines = ["proxies:"];
   const unsupported = [];
+  const usedNames = new Set();
+  let count = 0;
   for (const node of nodes) {
     const p = node.proxy || parseLink(node.link);
     if (!p) continue;
-    const name = node.name || p.name;
+    const displayName = displayNodeName(node, p);
     if (p.network === "xhttp" || p.network === "xhttp-reality" || (p.kind === "vless" && p.mode && p.network === "xhttp")) {
-      unsupported.push(name);
+      unsupported.push(displayName);
       continue;
     }
     if (p.reality && p.pin) {
       // reality 与证书指纹互斥；同时出现说明链接本身异常，明确拒绝。
-      unsupported.push(name);
+      unsupported.push(displayName);
       continue;
     }
+    const name = uniqueNodeName(displayName, usedNames);
+    count += 1;
     lines.push(`  - name: ${yamlString(name)}`);
     lines.push(`    type: ${p.kind === "hy2" ? "hysteria2" : p.kind}`);
     lines.push(`    server: ${yamlString(p.server)}`);
@@ -1110,21 +1140,23 @@ function toClash(nodes) {
       }
     }
   }
-  return { text: lines.join("\n") + "\n", unsupported };
+  return { text: lines.join("\n") + "\n", unsupported, count };
 }
 
 function toSingbox(nodes) {
   const outbounds = [];
   const unsupported = [];
+  const usedNames = new Set();
   for (const node of nodes) {
     const p = node.proxy || parseLink(node.link);
     if (!p) continue;
-    const tag = node.name || p.name;
+    const displayName = displayNodeName(node, p);
     // SW-04：sing-box 没有"证书指纹固定"字段（certificate_public_key_sha256 是公钥 pin，
     // 和证书指纹语义不同，不能混用），因此明确拒绝而不是退化成 insecure。
-    if (p.pin) { unsupported.push(tag); continue; }
+    if (p.pin) { unsupported.push(displayName); continue; }
     // SW-07：sing-box 该版本不保证支持 xhttp 传输，明确拒绝，不降级成 tcp。
-    if (p.kind === "vless" && (p.network === "xhttp" || p.network === "xhttp-reality")) { unsupported.push(tag); continue; }
+    if (p.kind === "vless" && (p.network === "xhttp" || p.network === "xhttp-reality")) { unsupported.push(displayName); continue; }
+    const tag = uniqueNodeName(displayName, usedNames);
     const tls = { enabled: true };
     if (p.sni) tls.server_name = p.sni;
     if (p.insecure) tls.insecure = true;
@@ -1172,7 +1204,7 @@ function toSingbox(nodes) {
       outbounds.push(o);
     }
   }
-  return { text: JSON.stringify({ outbounds }, null, 2), unsupported };
+  return { text: JSON.stringify({ outbounds }, null, 2), unsupported, count: outbounds.length };
 }
 
 /* ---------------- 请求/编码/响应工具 ---------------- */
