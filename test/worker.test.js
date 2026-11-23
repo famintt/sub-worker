@@ -313,6 +313,21 @@ test("partially unsupported nodes do not break the whole subscription", async ()
   assert.deepEqual(data.outbounds.map((o) => o.tag), ["Good"]);
 });
 
+test("percent-encoded tuic userinfo is split into uuid and password", async () => {
+  const env = makeEnv();
+  await reportLinks(env, "sgw", [
+    "tuic://28ca0cd1-a1a6-414f-8d6c-2eb6f13d309a%3A28ca0cd1-a1a6-414f-8d6c-2eb6f13d309a@52.221.131.249:10785?sni=pypi.org&alpn=h3&allow_insecure=1&congestion_control=bbr#SG-AWS-TUIC",
+    "tuic://a52455d0-cd68-429a-9c51-cca685c14b0b%3AtYgiUNr3eyQdmEXV@189.24.119.47:35748?sni=pypi.org&alpn=h3&allow_insecure=1&congestion_control=bbr#DE-9929-TUIC",
+  ]);
+  const res = await call(env, "GET", `/sub/sgw/${READ}?format=clash`);
+  assert.equal(res.status, 200);
+  const yaml = await res.text();
+  assert.match(yaml, /name: "SG-AWS-TUIC"[\s\S]*?uuid: "28ca0cd1-a1a6-414f-8d6c-2eb6f13d309a"/);
+  assert.match(yaml, /name: "SG-AWS-TUIC"[\s\S]*?password: "28ca0cd1-a1a6-414f-8d6c-2eb6f13d309a"/);
+  assert.match(yaml, /name: "DE-9929-TUIC"[\s\S]*?uuid: "a52455d0-cd68-429a-9c51-cca685c14b0b"/);
+  assert.match(yaml, /name: "DE-9929-TUIC"[\s\S]*?password: "tYgiUNr3eyQdmEXV"/);
+});
+
 test("an empty merged subscription is valid, not a format error", async () => {
   const env = makeEnv();
   const clash = await call(env, "GET", `/sub/all/${READ}?format=clash`);

@@ -1,5 +1,5 @@
 /**
- * sub-worker v2.0.5
+ * sub-worker v2.0.6
  *
  * 固定订阅入口 + 多机器自动上报 + WebUI 机器/节点管理 + 客户端格式适配
  *
@@ -22,7 +22,7 @@
  * WebUI：GET /ui
  */
 
-const VERSION = "2.0.5";
+const VERSION = "2.0.6";
 const MAX_BODY = 512 * 1024;
 const MAX_NODES = 500;
 const MAX_LINK = 8192;
@@ -77,7 +77,7 @@ code{font:12px ui-monospace,Consolas,monospace;color:#1d4ed8;word-break:break-al
 </div></div>
 
 <div class="wrap">
-<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.5</span></div>
+<div class="top"><div><h1>sub-worker <span class="tip">节点管理</span></h1><div class="hint">机器顺序决定合并订阅里的先后；非空的手动配置优先于自动上报，空的手动会被自动清除。</div></div><span class="ver" id="version">v2.0.6</span></div>
 
 
 <section class="card">
@@ -935,7 +935,19 @@ function parseLink(link) {
         obfsPassword: q.get("obfs-password") || "",
       };
     }
-    if (kind === "tuic") return { ...base, uuid: safeDecode(u.username), password: safeDecode(u.password), tls: true, sni: q.get("sni") || "", congestion: q.get("congestion_control") || "bbr", relay: q.get("udp_relay_mode") || "native" };
+    if (kind === "tuic") {
+      // 兼容把 "uuid:password" 整体百分号编码进 username 的生成器：
+      // tuic://uuid%3Apassword@host:port（Clash 会把它当成 uuid，password 为空）。
+      let tuicUuid = safeDecode(u.username);
+      let tuicPassword = safeDecode(u.password);
+      const sep = tuicUuid.indexOf(":");
+      if (!tuicPassword && sep > 0) {
+        tuicPassword = tuicUuid.slice(sep + 1);
+        tuicUuid = tuicUuid.slice(0, sep);
+      }
+      if (!tuicUuid || !tuicPassword) return null;
+      return { ...base, uuid: tuicUuid, password: tuicPassword, tls: true, sni: q.get("sni") || "", congestion: q.get("congestion_control") || "bbr", relay: q.get("udp_relay_mode") || "native" };
+    }
     if (kind === "trojan") return { ...base, password: safeDecode(u.username), tls: true, sni: q.get("sni") || "" };
     if (kind === "socks5" || kind === "socks") return { ...base, kind: "socks5", username: safeDecode(u.username), password: safeDecode(u.password), tls: false, sni: "" };
     if (kind === "ss") {
